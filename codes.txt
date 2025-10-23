@@ -1,16 +1,13 @@
 # In PowerShell run this to create the zip and the hash!
 
-if (!(Test-Path hardware/esp32/1.0.0/boards.txt)) { throw "boards.txt missing" }
-if (!(Test-Path hardware/esp32/1.0.0/platform.txt)) { throw "platform.txt missing" }
-if (!(Test-Path hardware/esp32/1.0.0/variants/TinZr)) { throw "variant missing" }
+cd "C:\Users\lua4006\Desktop\GitRepo\arduino-esp32-tinzr"
 
+# Rebuild the ZIP with the correct root (hardware/)
 Compress-Archive -Path "hardware" -DestinationPath "tinzr-esp32-1.0.0.zip" -Force
 
+# Verify checksum and size (optional but good to have)
 Get-FileHash .\tinzr-esp32-1.0.0.zip -Algorithm SHA256
 (Get-Item .\tinzr-esp32-1.0.0.zip).Length
-
-
-
 
 
 
