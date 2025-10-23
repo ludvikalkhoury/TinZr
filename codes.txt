@@ -2,12 +2,14 @@
 
 cd "C:\Users\lua4006\Desktop\GitRepo\arduino-esp32-tinzr"
 
-# Rebuild the ZIP with the correct root (hardware/)
-Compress-Archive -Path "hardware" -DestinationPath "tinzr-esp32-1.0.0.zip" -Force
+# Build a zip whose ROOT contains boards.txt, platform.txt, cores/, tools/, variants/, partitions/
+# (Note the * at the end to include the contents, not the folder itself)
+Compress-Archive -Path "hardware\esp32\1.0.0\*" -DestinationPath "tinzr-esp32-1.0.0.zip" -Force
 
-# Verify checksum and size (optional but good to have)
+# Verify checksum and size
 Get-FileHash .\tinzr-esp32-1.0.0.zip -Algorithm SHA256
 (Get-Item .\tinzr-esp32-1.0.0.zip).Length
+
 
 
 
