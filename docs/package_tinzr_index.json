@@ -1,0 +1,26 @@
+{
+  "packages": [
+    {
+      "name": "TinZr",
+      "maintainer": "Ludvik Alkhoury",
+      "websiteURL": "https://github.com/ludvikalkhoury/arduino-esp32-tinzr",
+      "email": "Ludvik.alkhoury@gmail.com",
+      "platforms": [
+        {
+          "name": "TinZr ESP32",
+          "architecture": "esp32",
+          "version": "1.0.0",
+          "category": "Contributed",
+          "url": "https://github.com/ludvikalkhoury/arduino-esp32-tinzr/releases/download/1.0.0/tinzr-esp32-1.0.0.zip",
+          "archiveFileName": "tinzr-esp32-1.0.0.zip",
+          "checksum": "SHA-256:108FF99FAF269403D988F48B9339D4E578595713B8FAA0040C8B3DDFBDC4187E",
+          "size": "20598996",
+          "boards": [
+            { "name": "TinZr ESP32-C3 Custom Board" }
+          ]
+        }
+      ],
+      "tools": []
+    }
+  ]
+}
