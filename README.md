@@ -4,6 +4,11 @@ This repository contains the **TinZr ESP32-C3** custom board definition for the 
 It provides a clean, Boards-Manager-installable package so anyone can use your board with one simple URL.
 
 ---
+## Pinout
+[TinZr_Pinout.pdf](https://github.com/user-attachments/files/23109050/TinZr_Pinout.pdf)
+
+
+
 
 ## 🚀 Quick Install
 
@@ -52,5 +57,6 @@ void loop() {
   strip.setPixelColor(0, strip.Color(0, 255, 0)); strip.show(); delay(500);
   strip.setPixelColor(0, strip.Color(0, 0, 255)); strip.show(); delay(500);
 }
+
 
 
