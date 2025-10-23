@@ -5,7 +5,7 @@ It provides a clean, Boards-Manager-installable package so anyone can use your b
 
 ---
 ## Pinout
-[TinZr_Pinout.pdf](https://github.com/user-attachments/files/23109050/TinZr_Pinout.pdf)
+![TinZr ESP32-C3 Pinout](https://github.com/ludvikalkhoury/arduino-esp32-tinzr/blob/main/docs/TinZr_Pinout.png?raw=true)
 
 
 
@@ -57,6 +57,7 @@ void loop() {
   strip.setPixelColor(0, strip.Color(0, 255, 0)); strip.show(); delay(500);
   strip.setPixelColor(0, strip.Color(0, 0, 255)); strip.show(); delay(500);
 }
+
 
 
 
