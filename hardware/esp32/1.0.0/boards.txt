@@ -1,4 +1,18 @@
 ##############################################################
+# ===== Global menus (required) =====
+menu.JTAGAdapter=JTAG Adapter
+menu.CDCOnBoot=USB CDC On Boot
+menu.PartitionScheme=Partition Scheme
+menu.CPUFreq=CPU Frequency
+menu.FlashMode=Flash Mode
+menu.FlashFreq=Flash Frequency
+menu.FlashSize=Flash Size
+menu.UploadSpeed=Upload Speed
+menu.DebugLevel=Core Debug Level
+menu.EraseFlash=Erase All Flash Before Sketch Upload
+menu.ZigbeeMode=Zigbee Mode
+
+
 TinZr.name=TinZr ESP32-C3 Custom Board
 
 TinZr.bootloader.tool=esptool_py
