@@ -12,7 +12,7 @@ Open the Arduino IDE and go to:
 
 **File → Preferences → Additional Boards Manager URLs**, then paste:
 
-``https://ludvikalkhoury.github.io/arduino-esp32-tinzr/package_tinzr_index.json``
+```https://ludvikalkhoury.github.io/arduino-esp32-tinzr/package_tinzr_index.json```
 
 
 Click **OK**.
@@ -50,3 +50,4 @@ void loop() {
   strip.setPixelColor(0, strip.Color(0, 255, 0)); strip.show(); delay(500);
   strip.setPixelColor(0, strip.Color(0, 0, 255)); strip.show(); delay(500);
 }
+
