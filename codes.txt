@@ -1,0 +1,23 @@
+# In PowerShell run this to create the zip and the hash!
+
+if (!(Test-Path hardware/esp32/1.0.0/boards.txt)) { throw "boards.txt missing" }
+if (!(Test-Path hardware/esp32/1.0.0/platform.txt)) { throw "platform.txt missing" }
+if (!(Test-Path hardware/esp32/1.0.0/variants/TinZr)) { throw "variant missing" }
+
+Compress-Archive -Path "hardware" -DestinationPath "tinzr-esp32-1.0.0.zip" -Force
+
+Get-FileHash .\tinzr-esp32-1.0.0.zip -Algorithm SHA256
+(Get-Item .\tinzr-esp32-1.0.0.zip).Length
+
+
+
+
+
+
+
+
+
+
+
+
+
