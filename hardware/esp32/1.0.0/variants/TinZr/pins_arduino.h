@@ -6,6 +6,8 @@
 
 // ===== Built-in RGB (WS2812C) on GPIO8 =====
 #define PIN_RGB_LED 8
+#define PB_PIN 9
+
 // Use a "virtual" builtin index so rgbLedWrite() works (not digitalWrite)
 static const uint8_t LED_BUILTIN = SOC_GPIO_PIN_COUNT + PIN_RGB_LED;
 #define BUILTIN_LED  LED_BUILTIN
