@@ -1,11 +1,15 @@
 /*
-  TinZr legacy BLE firmware (with RX command support, fixed RGB/BRIGHT)
+  TinZr legacy BLE firmware (RX command support; IMU+PPG normalized)
   - ESP32-C3 + classic ESP32 BLE (BLEDevice.h)
   - Service UUID:        4fafc201-1fb5-459e-8fcc-c5c9c331914b
   - Notify Characteristic beb5483e-36e1-4688-b7f5-ea07361b26a8  (TX -> App)
   - RX Characteristic     e7810a71-73ae-499d-8c15-faa9aef0c3f2  (App -> FW)
-  - Streams: "ax,ay,az,ir,red"
-  - Also sends: "BAT,<volts>" every 5 minutes
+
+  Sends (when enabled):
+    IMU,ax,ay,az,gx,gy,gz,temp
+    PPG,ir,red,green
+  Also sends:
+    BAT,<volts>  (on boot, post-connect, periodic; and on READ_BAT)
 */
 
 #include <Arduino.h>
@@ -21,7 +25,7 @@
 // =================================
 
 // -------- Pins & board specifics --------
-#define PIN_RGB_LED  8      // NeoPixel data (change if your board differs)
+#define PIN_RGB_LED  8      // NeoPixel data (GPIO8 on many C3 boards)
 #define NUM_LEDS     1
 #define VBAT_PIN     A1     // Battery divider input (top 220k -> VBAT, bottom 150k -> GND)
 // If you enable FEAT_BUTTON_REC, define PB_PIN here (to GND, INPUT_PULLUP)
@@ -42,39 +46,26 @@ static const float DIV_RATIO = 150000.0f / (220000.0f + 150000.0f);  // ≈0.405
   uint32_t gLastLedMs  = 0;
   uint8_t  gHue        = 0;
 
-  // Track last solid color so BRIGHT and RAINBOW OFF re-apply it
-  static uint8_t gLastR = 10, gLastG = 0, gLastB = 0; // default boot color
-
   static uint32_t Wheel(uint8_t pos) {
     if (pos < 85) return strip.Color(pos * 3, 255 - pos * 3, 0);
     if (pos < 170) { pos -= 85; return strip.Color(255 - pos * 3, 0, pos * 3); }
     pos -= 170; return strip.Color(0, pos * 3, 255 - pos * 3);
   }
 
-  // Apply exactly these RGB bytes at current brightness
   static void led_apply(uint8_t r, uint8_t g, uint8_t b) {
-    // Optional nicer brightness perception:
-    // uint32_t c = strip.gamma32(strip.Color(r, g, b));
-    // strip.setPixelColor(0, c);
-    strip.setPixelColor(0, strip.Color(r, g, b)); // linear
+    strip.setPixelColor(0, strip.Color(r, g, b));
     strip.show();
   }
 
   static void led_set(uint8_t r, uint8_t g, uint8_t b){
-    gLastR = r; gLastG = g; gLastB = b;
+    strip.setBrightness(gBrightness);
     led_apply(r, g, b);
   }
 
   static void led_brightness(uint8_t b){
     gBrightness = b;
     strip.setBrightness(gBrightness);
-    if (!gRainbow) {
-      // re-apply the last solid color at the new brightness
-      led_apply(gLastR, gLastG, gLastB);
-    } else {
-      // rainbow loop will refresh on next frame
-      strip.show();
-    }
+    strip.show();
   }
 #endif
 
@@ -83,29 +74,35 @@ static const float DIV_RATIO = 150000.0f / (220000.0f + 150000.0f);  // ≈0.405
   #include <Adafruit_LSM6DS3TRC.h>
   #include <Adafruit_Sensor.h>
   Adafruit_LSM6DS3TRC lsm6;
-  bool     gIMUEnabled   = true;         // start ON for easy testing
-  uint32_t gLastImuMs    = 0;
-  uint32_t IMU_INTERVAL_MS = 100;        // 10 Hz (set 25 for ~40 Hz)
+  bool     gIMUEnabled     = true;         // start ON for easy testing
+  uint32_t gLastImuMs      = 0;
+  uint32_t IMU_INTERVAL_MS = 100;          // 10 Hz (set ~25 for ~40 Hz)
+  // latest
+  float ax=0, ay=0, az=0;
+  float gx=0, gy=0, gz=0;
+  float tC=0;
 #endif
 
 // ===== PPG =====
 #if FEAT_PPG
   #include "MAX30105.h"
-  #include "spo2_algorithm.h"  // unused now, kept for future
   MAX30105 particleSensor;
-  bool     gPPGEnabled   = true;          // start ON for easy testing
-  uint32_t gLastPpgMs    = 0;
-  uint32_t PPG_INTERVAL_MS = 100;         // 10 Hz (set 25 for ~40 Hz)
-  const uint32_t NO_FINGER_THRESHOLD = 30000;
+  bool     gPPGEnabled      = true;        // start ON for easy testing
+  uint32_t gLastPpgMs       = 0;
+  uint32_t PPG_INTERVAL_MS  = 100;         // 10 Hz (set ~25 for ~40 Hz)
+  const uint32_t NO_FINGER_THRESHOLD = 1000;
+  // latest
+  uint32_t ir=0, red=0, green=0;
 #endif
 
 // ===== Battery =====
 #if FEAT_BATTERY
   uint32_t gLastBatMs = 0;
   const uint32_t BAT_INTERVAL_MS = 5UL * 60UL * 1000UL; // 5 minutes
+
   static float readVBat() {
     #if defined(analogSetPinAttenuation)
-      analogSetPinAttenuation(VBAT_PIN, ADC_11db);
+      analogSetPinAttenuation(VBAT_PIN, ADC_ATTEN_DB_11); // ~3.9V FS on ADC pin
     #endif
     uint32_t acc = 0; const int N = 16;
     for (int i=0;i<N;++i){ acc += analogRead(VBAT_PIN); delay(2); }
@@ -158,27 +155,33 @@ static const float DIV_RATIO = 150000.0f / (220000.0f + 150000.0f);  // ≈0.405
 // RX write from app:
 #define CHAR_RX_UUID        "e7810a71-73ae-499d-8c15-faa9aef0c3f2"
 
-BLEServer*         pServer    = nullptr;
-BLECharacteristic* pNotifyChar= nullptr;
-BLECharacteristic* pRxChar    = nullptr;
+BLEServer*         pServer     = nullptr;
+BLECharacteristic* pNotifyChar = nullptr;
+BLECharacteristic* pRxChar     = nullptr;
 bool deviceConnected = false;
 
 static String gCmdBuf;
+volatile bool gJustConnected = false;
+
+// --- helper: TX notify + Serial echo for debug ---
+static void bleSendLine(const String& line){
+  if (!pNotifyChar) return;
+  std::string s = (line + "\n").c_str();
+  pNotifyChar->setValue((uint8_t*)s.data(), s.size());
+  if (deviceConnected) pNotifyChar->notify();
+  Serial.print(F("TX ")); Serial.println(line);
+}
 
 class MyServerCallbacks : public BLEServerCallbacks {
-  void onConnect(BLEServer* server) override { deviceConnected = true; }
+  void onConnect(BLEServer* server) override {
+    deviceConnected = true;
+    gJustConnected = true;
+  }
   void onDisconnect(BLEServer* server) override {
     deviceConnected = false;
     server->getAdvertising()->start();
   }
 };
-
-static void bleSendLine(const String& line){
-  if (!deviceConnected || !pNotifyChar) return;
-  std::string s = (line + "\n").c_str();
-  pNotifyChar->setValue((uint8_t*)s.data(), s.size());
-  pNotifyChar->notify();
-}
 
 // ---- Command handling ----
 static void handleCommand(const String& raw) {
@@ -186,7 +189,9 @@ static void handleCommand(const String& raw) {
 
 #if FEAT_BATTERY
   if (s.equalsIgnoreCase("READ_BAT")) {
-    bleSendLine(String("BAT,") + String(readVBat(), 3));
+    float v = readVBat();
+    Serial.print(F("CMD READ_BAT -> ")); Serial.println(v, 3);
+    bleSendLine(String("BAT,") + String(v, 3));
     return;
   }
 #endif
@@ -196,8 +201,10 @@ static void handleCommand(const String& raw) {
     int r=0,g=0,b=0;
     if (sscanf(s.c_str(),"RGB %d %d %d",&r,&g,&b)==3) {
       r = constrain(r,0,255); g = constrain(g,0,255); b = constrain(b,0,255);
-      gRainbow = false;                   // leave rainbow
+      gRainbow = false;
       led_set((uint8_t)r,(uint8_t)g,(uint8_t)b);
+      Serial.printf("CMD RGB -> %d,%d,%d\n", r,g,b);
+      bleSendLine(String("ECHO,RGB ") + r + " " + g + " " + b);
     }
     return;
   }
@@ -205,28 +212,26 @@ static void handleCommand(const String& raw) {
     int v=0;
     if (sscanf(s.c_str(),"BRIGHT %d",&v)==1) {
       v = constrain(v,0,255);
-      led_brightness((uint8_t)v);         // re-applies last solid color if not rainbow
+      led_brightness((uint8_t)v);
+      Serial.printf("CMD BRIGHT -> %d\n", v);
+      bleSendLine(String("ECHO,BRIGHT ") + v);
     }
     return;
   }
-  if (s.equalsIgnoreCase("RAINBOW ON"))  { gRainbow = true;  return; }
-  if (s.equalsIgnoreCase("RAINBOW OFF")) {
-    gRainbow = false;
-    led_apply(gLastR, gLastG, gLastB);    // restore last solid color
-    return;
-  }
+  if (s.equalsIgnoreCase("RAINBOW ON"))  { gRainbow = true;  Serial.println(F("CMD RAINBOW ON"));  bleSendLine("ECHO,RAINBOW ON");  return; }
+  if (s.equalsIgnoreCase("RAINBOW OFF")) { gRainbow = false; Serial.println(F("CMD RAINBOW OFF")); bleSendLine("ECHO,RAINBOW OFF"); return; }
 #endif
 
 #if FEAT_IMU
-  if (s.equalsIgnoreCase("START_IMU")) { gIMUEnabled = true;  return; }
-  if (s.equalsIgnoreCase("STOP_IMU"))  { gIMUEnabled = false; return; }
+  if (s.equalsIgnoreCase("START_IMU")) { gIMUEnabled = true;  Serial.println(F("CMD START_IMU")); bleSendLine("ECHO,START_IMU"); return; }
+  if (s.equalsIgnoreCase("STOP_IMU"))  { gIMUEnabled = false; Serial.println(F("CMD STOP_IMU"));  bleSendLine("ECHO,STOP_IMU");  return; }
 #endif
 
 #if FEAT_PPG
-  if (s.equalsIgnoreCase("START_PPG")) { gPPGEnabled = true;  return; }
-  if (s.equalsIgnoreCase("STOP_PPG"))  { gPPGEnabled = false; return; }
-  if (s.equalsIgnoreCase("START_ALL")) { gIMUEnabled = true; gPPGEnabled = true; return; }
-  if (s.equalsIgnoreCase("STOP_ALL"))  { gIMUEnabled = false; gPPGEnabled = false; return; }
+  if (s.equalsIgnoreCase("START_PPG")) { gPPGEnabled = true;  Serial.println(F("CMD START_PPG")); bleSendLine("ECHO,START_PPG"); return; }
+  if (s.equalsIgnoreCase("STOP_PPG"))  { gPPGEnabled = false; Serial.println(F("CMD STOP_PPG"));  bleSendLine("ECHO,STOP_PPG");  return; }
+  if (s.equalsIgnoreCase("START_ALL")) { gIMUEnabled = true; gPPGEnabled = true; Serial.println(F("CMD START_ALL")); bleSendLine("ECHO,START_ALL"); return; }
+  if (s.equalsIgnoreCase("STOP_ALL"))  { gIMUEnabled = false; gPPGEnabled = false; Serial.println(F("CMD STOP_ALL")); bleSendLine("ECHO,STOP_ALL");  return; }
 #endif
 
   // echo for debug
@@ -250,15 +255,14 @@ class RxCharCallbacks : public BLECharacteristicCallbacks {
 void setup() {
   Serial.begin(115200);
   delay(200);
-  Serial.println(F("\nTinZr legacy BLE (with RX, fixed RGB/BRIGHT)"));
+  Serial.println(F("\nTinZr legacy BLE (IMU+PPG normalized, solid BAT)"));
 
   Wire.begin();
 
 #if FEAT_LED
   strip.begin();
   strip.setBrightness(gBrightness);
-  // explicit boot color (stored in gLastR/G/B)
-  led_apply(gLastR, gLastG, gLastB);
+  led_apply(10,0,0); // boot color
 #endif
 
 #if FEAT_IMU
@@ -273,10 +277,10 @@ void setup() {
 
 #if FEAT_PPG
   if (particleSensor.begin(Wire, I2C_SPEED_FAST)) {
-    particleSensor.setup();
+    particleSensor.setup();            // default config
+    particleSensor.setPulseAmplitudeIR(0x0A);    // small LED currents to start
     particleSensor.setPulseAmplitudeRed(0x0A);
-    particleSensor.setPulseAmplitudeIR(0x0A);
-    particleSensor.setPulseAmplitudeGreen(0x00);
+    particleSensor.setPulseAmplitudeGreen(0x08); // enable GREEN, too
     Serial.println(F("MAX30105 ready."));
   } else Serial.println(F("MAX30105 not found."));
 #endif
@@ -307,11 +311,38 @@ void setup() {
   adv->start();
 
 #if FEAT_BATTERY
-  // initial battery announce (GUI will show it)
-  bleSendLine(String("BAT,") + String(readVBat(), 3));
+  // initial battery announce
+  float v0 = readVBat();
+  Serial.print(F("BOOT BAT -> ")); Serial.println(v0, 3);
+  bleSendLine(String("BAT,") + String(v0, 3));
 #endif
 
   Serial.println(F("Setup done. Advertising as TinZr…"));
+}
+
+// ================== helpers to TX ==================
+static void sendIMU(){
+#if FEAT_IMU
+  char buf[96];
+  snprintf(buf, sizeof(buf), "IMU,%.3f,%.3f,%.3f,%.2f,%.2f,%.2f,%.2f",
+           ax, ay, az, gx, gy, gz, tC);
+  bleSendLine(String(buf));
+#if FEAT_SDLOG
+  sd_append("IMU", String(buf));
+#endif
+#endif
+}
+
+static void sendPPG(){
+#if FEAT_PPG
+  char buf[64];
+  snprintf(buf, sizeof(buf), "PPG,%lu,%lu,%lu",
+           (unsigned long)ir, (unsigned long)red, (unsigned long)green);
+  bleSendLine(String(buf));
+#if FEAT_SDLOG
+  sd_append("PPG", String(buf));
+#endif
+#endif
 }
 
 // ================== loop ==================
@@ -326,54 +357,67 @@ void loop() {
   }
 #endif
 
+  // Re-announce battery right after a new connection (give CCCD time)
+  static uint32_t connectAnnounceAt = 0;
+  if (gJustConnected) {
+    gJustConnected = false;
+    connectAnnounceAt = now + 750;   // ~0.75s later: client likely subscribed
+    Serial.println(F("BLE connected, scheduling BAT announce..."));
+  }
+  if (connectAnnounceAt && (int32_t)(now - connectAnnounceAt) >= 0) {
+    connectAnnounceAt = 0;
+#if FEAT_BATTERY
+    float vc = readVBat();
+    Serial.print(F("POST-CONNECT BAT -> ")); Serial.println(vc, 3);
+    bleSendLine(String("BAT,") + String(vc, 3));
+#endif
+  }
+
 #if FEAT_BATTERY
   if (now - gLastBatMs >= BAT_INTERVAL_MS) {
     gLastBatMs = now;
-    bleSendLine(String("BAT,") + String(readVBat(), 3));
+    float vp = readVBat();
+    Serial.print(F("PERIODIC BAT -> ")); Serial.println(vp, 3);
+    bleSendLine(String("BAT,") + String(vp, 3));
   }
-#endif
-
-#if FEAT_IMU || FEAT_PPG
-  // Accumulate and send at min(IMU,PPG) cadence
-  static float ax=0, ay=0, az=0;
-  static uint32_t ir=0, red=0;
-  static uint32_t lastLegacySend = 0;
 #endif
 
 #if FEAT_IMU
   if (gIMUEnabled && (now - gLastImuMs >= IMU_INTERVAL_MS)) {
     gLastImuMs = now;
-    sensors_event_t accel, gyro, temp;
-    lsm6.getEvent(&accel, &gyro, &temp);
-    ax = accel.acceleration.x;
-    ay = accel.acceleration.y;
-    az = accel.acceleration.z;
+    sensors_event_t a, g, t;
+    lsm6.getEvent(&a, &g, &t);
+    ax = a.acceleration.x;   // m/s^2
+    ay = a.acceleration.y;
+    az = a.acceleration.z;
+    gx = g.gyro.x * 180.0f / PI;  // convert rad/s -> deg/s if needed
+    gy = g.gyro.y * 180.0f / PI;
+    gz = g.gyro.z * 180.0f / PI;
+    tC = t.temperature;      // °C
   }
 #endif
 
 #if FEAT_PPG
   if (gPPGEnabled && (now - gLastPpgMs >= PPG_INTERVAL_MS)) {
     gLastPpgMs = now;
-    uint32_t irv = particleSensor.getIR();
-    uint32_t redv = particleSensor.getRed();
-    if (irv < NO_FINGER_THRESHOLD) { ir = 0; red = 0; }
-    else { ir = irv; red = redv; }
+    uint32_t irv   = particleSensor.getIR();
+    uint32_t redv  = particleSensor.getRed();
+    uint32_t grnv  = particleSensor.getGreen();
+    if (irv < NO_FINGER_THRESHOLD) { ir=red=green=0; }
+    else { ir = irv; red = redv; green = grnv; }
   }
 #endif
 
-#if FEAT_IMU || FEAT_PPG
+  // ===== Send streams at the fastest enabled cadence =====
   const uint32_t minPeriod = min(
-    (uint32_t)(FEAT_IMU ? IMU_INTERVAL_MS : 1000),
-    (uint32_t)(FEAT_PPG ? PPG_INTERVAL_MS : 1000)
+    (uint32_t)(FEAT_IMU && gIMUEnabled ? IMU_INTERVAL_MS : 1000000),
+    (uint32_t)(FEAT_PPG && gPPGEnabled ? PPG_INTERVAL_MS : 1000000)
   );
-  if (deviceConnected && (now - lastLegacySend >= minPeriod)) {
-    lastLegacySend = now;
 
-    // LEGACY FORMAT: "ax,ay,az,ir,red"
-    char line[96];
-    snprintf(line, sizeof(line), "%.2f,%.2f,%.2f,%lu,%lu",
-             ax, ay, az, (unsigned long)ir, (unsigned long)red);
-    bleSendLine(String(line));
+  static uint32_t lastSend = 0;
+  if (deviceConnected && (now - lastSend >= minPeriod)) {
+    lastSend = now;
+    if (FEAT_IMU && gIMUEnabled) sendIMU();
+    if (FEAT_PPG && gPPGEnabled) sendPPG();
   }
-#endif
 }

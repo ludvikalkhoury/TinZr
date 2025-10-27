@@ -2,25 +2,25 @@
 # File: ble_worker.py
 # =========================
 import os
-os.environ.setdefault("BLEAK_BACKEND", "winrt")  # Windows: try WinRT first
+os.environ.setdefault("BLEAK_BACKEND", "winrt")  # Windows: prefer WinRT; we fall back to dotnet if needed
 
-import asyncio, threading
+import asyncio, threading, time
 from queue import Queue
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Tuple
 from bleak import BleakScanner, BleakClient, BleakError
 
 # ---------- BLE Profiles we support ----------
-# New TinZr (Nordic UART)
+# Nordic UART (new TinZr)
 NUS_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 NUS_RX_UUID      = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  # write
 NUS_TX_UUID      = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"  # notify
 DEFAULT_NAME     = "TinZr"
 
-# Legacy (classic ESP32 BLE)
+# Legacy (classic ESP32 BLEDevice.h)
 LEG_SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 LEG_CHAR_UUID    = "beb5483e-36e1-4688-b7f5-ea07361b26a8"  # notify
-LEG_RX_UUID      = "e7810a71-73ae-499d-8c15-faa9aef0c3f2"   # optional RX (if present)
+LEG_RX_UUID      = "e7810a71-73ae-499d-8c15-faa9aef0c3f2"   # write (if present)
 LEGACY_NAME      = "TinZr"
 
 SCAN_TIMEOUT_SEC = 8.0
@@ -32,6 +32,7 @@ class DiscoveredDevice:
 
 
 def _get_uuids(ble_device) -> List[str]:
+    """Compatibility helper for older Bleak that exposes UUIDs under .metadata."""
     try:
         return [(x or "").lower() for x in (ble_device.metadata or {}).get("uuids") or []]
     except Exception:
@@ -55,15 +56,12 @@ def _is_writable(ch) -> bool:
         props = getattr(ch, "properties", None)
         if props is None:
             return False
-        # iterable of strings
         if isinstance(props, (list, tuple, set)):
             p = {str(x).lower().replace("_", "-") for x in props}
             return ("write" in p) or ("write-without-response" in p)
-        # single string
         if isinstance(props, str):
             s = props.lower()
             return ("write" in s)
-        # fallback string conversion
         s = str(props).lower()
         return ("write" in s)
     except Exception:
@@ -149,6 +147,7 @@ class AsyncBleWorker:
 
             named.sort(key=priority)
 
+            # Fallback to dotnet backend on Windows if WinRT returns nothing
             if not named and os.name == "nt" and backend != "dotnet":
                 self.log("No candidates with WinRT. Retrying with BLEAK_BACKEND=dotnet…")
                 os.environ["BLEAK_BACKEND"] = "dotnet"
@@ -167,9 +166,12 @@ class AsyncBleWorker:
                 self.log("Scan results:")
                 for dd in named[:10]:
                     self.log(f"  - {dd.name} [{dd.address}]")
+                # Auto-pick hint
                 self._uiq.put(("hint_autopick", named[0].address))
 
-            self._uiq.put(("scan_result", named))
+            # *** IMPORTANT: send JSON-friendly payload for the dropdown ***
+            devices_payload = [{"name": d.name, "address": d.address} for d in named]
+            self._uiq.put(("scan_result", devices_payload))
         return asyncio.run_coroutine_threadsafe(_scan(), self._loop)
 
     # ---------- connect ----------
@@ -186,6 +188,7 @@ class AsyncBleWorker:
                 svcs = await c.get_services()
                 svc_uuids = {s.uuid.lower() for s in svcs}
 
+                # Identify & subscribe
                 if NUS_SERVICE_UUID.lower() in svc_uuids:
                     self._mode = "nus"
                     self._notify_uuid = NUS_TX_UUID
@@ -198,7 +201,6 @@ class AsyncBleWorker:
                     self._notify_uuid = LEG_CHAR_UUID
                     self._write_uuid  = None
 
-                    # Log all chars
                     self.log("GATT layout:")
                     for svc in svcs:
                         self.log(f"  svc {svc.uuid}")
@@ -232,6 +234,7 @@ class AsyncBleWorker:
                         self.log("Mode: Legacy (notify-only).")
 
                 else:
+                    # Fallback attempts by characteristic
                     try:
                         await c.start_notify(NUS_TX_UUID, self._on_notify)
                         self._mode = "nus"
@@ -249,6 +252,19 @@ class AsyncBleWorker:
                 self._rx_buf.clear()
                 self._uiq.put(("connected", True))
                 self.log("Connected.")
+
+                # --- Ask for a fresh BAT once notifications are live ---
+                await asyncio.sleep(0.7)  # give CCCD time on some stacks
+                if self._write_uuid:
+                    try:
+                        cmd = b"READ_BAT\n"
+                        await c.write_gatt_char(self._write_uuid, cmd, response=False)
+                        self.log("[BLE→FW] READ_BAT")
+                    except Exception as e:
+                        self.log(f"READ_BAT send failed: {e}")
+                else:
+                    self.log("No writable RX char; relying on device's post-connect BAT notify.")
+
             except Exception as e:
                 self._uiq.put(("connected", False))
                 self.log(f"Connect failed: {e}")
@@ -284,7 +300,7 @@ class AsyncBleWorker:
             data = (text.rstrip("\r\n") + "\n").encode()
             try:
                 await self._client.write_gatt_char(self._write_uuid, data, response=require_response)
-                self.log(f"→ {text}")
+                self.log(f"[Py→FW] {text.strip()}")
             except BleakError as e:
                 self.log(f"Write failed: {e}")
         return asyncio.run_coroutine_threadsafe(_w(), self._loop)
@@ -303,13 +319,27 @@ class AsyncBleWorker:
             del self._rx_buf[:nl + 1]
             line = raw.decode(errors="replace").rstrip("\r")
 
+            # Log everything we receive to the Python terminal
+            self._uiq.put(("log", f"[FW→Py] {line}"))
+
             if line.startswith("IMU,"):
                 self._uiq.put(("imu", line)); continue
+
             if line.startswith(("VBAT,", "BAT,")):
-                self._uiq.put(("bat", line)); continue
+                # Forward raw line
+                self._uiq.put(("bat", line))
+                # Also send normalized volts for direct UI use
+                try:
+                    val = float(line.split(",", 1)[1])
+                    self._uiq.put(("bat_val", {"volts": val, "ts": time.time()}))
+                except Exception:
+                    pass
+                continue
+
             if line.startswith("PPG,"):
                 self._uiq.put(("ppg", line)); continue
 
+            # Legacy stream "ax,ay,az,ir,red"
             if self._mode == "legacy":
                 parts = [p.strip() for p in line.split(",")]
                 if len(parts) == 5:
@@ -323,4 +353,6 @@ class AsyncBleWorker:
                         continue
                     except Exception:
                         pass
+
+            # Fallback generic
             self._uiq.put(("notify", line))
