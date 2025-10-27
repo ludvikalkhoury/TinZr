@@ -176,7 +176,16 @@ class ImuTab(ttk.Frame):
             width=40, height=20
         ).pack(side="left")
         ttk.Label(tog, text="PPG").pack(side="left", padx=(6, 12))
+        
+        
+        # Make sure both IMU and PPG are off by default
+        try:
+            self.ble.write_line("STOP_IMU")
+            self.ble.write_line("STOP_PPG")
+        except Exception:
+            pass
 
+        
         # Points to show (inline, same row)
         pts = ttk.Frame(ctr, style="Card.TFrame"); pts.pack(side="left", padx=(12, 0))
         ttk.Label(pts, text="Points to show:", style="Lbl.TLabel").pack(side="left")
@@ -237,19 +246,28 @@ class ImuTab(ttk.Frame):
 
     # ===== Public direct handlers (optional) =====
     def handle_imu_line(self, text: str):
+        if not self._imu_on.get():  # gate UI
+            return
         if not text: return
         self._handle_imu_common(text)
 
     def handle_ppg_line(self, text: str):
+        if not self._ppg_on.get():  # gate UI
+            return
         if not text: return
         self._handle_ppg_common(text)
 
-    # ===== Tk event handlers =====
+    # --- Tk event handlers ---
     def _on_imu_evt(self, evt):
+        if not self._imu_on.get():  # gate UI
+            return
         self._handle_imu_common(str(getattr(evt, "data", "")))
 
     def _on_ppg_evt(self, evt):
+        if not self._ppg_on.get():  # gate UI
+            return
         self._handle_ppg_common(str(getattr(evt, "data", "")))
+
 
     # ===== Core parse/update: IMU =====
     def _handle_imu_common(self, payload: str):
