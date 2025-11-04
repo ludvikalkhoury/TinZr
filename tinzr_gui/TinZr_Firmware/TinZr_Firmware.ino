@@ -280,7 +280,7 @@ void setup() {
     particleSensor.setup();            // default config
     particleSensor.setPulseAmplitudeIR(0x0A);    // small LED currents to start
     particleSensor.setPulseAmplitudeRed(0x0A);
-    particleSensor.setPulseAmplitudeGreen(0x08); // enable GREEN, too
+    particleSensor.setPulseAmplitudeGreen(0x0A); //
     Serial.println(F("MAX30105 ready."));
   } else Serial.println(F("MAX30105 not found."));
 #endif
