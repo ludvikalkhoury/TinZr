@@ -25,7 +25,6 @@
 // =================================
 
 // -------- Pins & board specifics --------
-#define PIN_RGB_LED  8      // NeoPixel data (GPIO8 on many C3 boards)
 #define NUM_LEDS     1
 #define VBAT_PIN     A1     // Battery divider input (top 220k -> VBAT, bottom 150k -> GND)
 // If you enable FEAT_BUTTON_REC, define PB_PIN here (to GND, INPUT_PULLUP)

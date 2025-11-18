@@ -1,114 +1,154 @@
 /*
 ===============================================================================
-TinZr — Serial Control for SSID / PASS / Static Mode / Hostname (+ Flash Save)
+TinZr — WiFi + WebServer test (no IMU)
 ===============================================================================
 
 WHAT THIS DOES
 --------------
-- OTA + serial console (WIFI autosave+reboot, STATIC, HOST, SAVE/LOAD/SHOW, etc.)
-- Uses a NeoPixel (Adafruit_NeoPixel) for the RGB LED
-- Pushbutton cycles MAGENTA brightness: 0 → 50 → 100 → 150 → 200 → 0 ...
+- Stores SSID / PASS / HOSTNAME in TinZrConsoleDefaults DEF
+  (so your Python flasher can still patch them)
+- Connects to WiFi using DEF.ssid / DEF.pass
+- Sets WiFi hostname from DEF.hostname
+- Uses NeoPixel as connect status:
+    - Blinks red while connecting
+    - Solid blue when connected
+- Starts a simple HTTP server on port 80:
+    - GET /      → HTML page with TinZr title + shows IP / hostname
 ===============================================================================
 */
 
 #include <TinZrOTA.h>
-#include <TinZrConsole.h>
+#include <TinZrConsole.h>      // Only for TinZrConsoleDefaults type (no Console.begin here)
 #include <Adafruit_NeoPixel.h>
 
+#include <WiFi.h>
+#include <WebServer.h>
 
-// ========== OTA SETTINGS STARTS ==========
+// ========== OTA-LIKE SETTINGS (FOR PATCHER) ==========
+// IMPORTANT: keep these as string literals so your Python flasher can replace them!
 TinZrConsoleDefaults DEF = {
   .ssid       = "Ludvik",
   .pass       = "Lud12345",
-  .hostname   = "esp32c3-ota",
+  .hostname   = "TinZr-ota",
   .use_static = false
 };
-TinZrConsole Console;
-// ========== OTA SETTINGS ENDS ==========
+// We don't actually use TinZrConsole/OTA in this sketch; DEF is just the
+// canonical place for SSID/PASS/HOSTNAME so your GUI auto-patcher works.
 
+// Convenience aliases for WiFi logic
+const char* WIFI_SSID     = DEF.ssid;
+const char* WIFI_PASSWORD = DEF.pass;
+const char* WIFI_HOSTNAME = DEF.hostname;
 
+// ========== LED (NeoPixel) SETUP ==========
 
-// ========== MAIN CODE SETTINGS STARTS ==========
-//  NeoPixel 
-#define USER_NUM_LEDS 1
-Adafruit_NeoPixel strip(USER_NUM_LEDS, PIN_RGB_LED, NEO_GRB + NEO_KHZ800);
+#define NUM_PIXELS 1
+Adafruit_NeoPixel pixels(NUM_PIXELS, PIN_RGB_LED, NEO_GRB + NEO_KHZ800);
 
-// Brightness steps (0..200). We'll set NeoPixel global brightness to these.
-static const uint8_t BR_STEPS[] = {0, 50, 100, 150, 200};
-static const uint8_t N_STEPS    = sizeof(BR_STEPS) / sizeof(BR_STEPS[0]);
-static uint8_t br_idx           = 0;
-
-// Button debounce
-static bool btn_prev = true;           // INPUT_PULLUP → idle HIGH
-static unsigned long last_edge_ms = 0;
-
-// Set LED to magenta at current global brightness
-static inline void show_magenta() {
-  strip.setPixelColor(0, strip.Color(255, 0, 255));  // magenta
-  strip.show();
+static inline void setColor(uint8_t r, uint8_t g, uint8_t b) {
+  pixels.setPixelColor(0, pixels.Color(r, g, b));
+  pixels.show();
 }
 
-// Set brightness (0..200) → apply to strip and refresh magenta
-static inline void set_brightness_0_200(uint8_t b) {
-  // Adafruit_NeoPixel brightness is 0..255; your steps are 0..200. Map linearly.
-  uint16_t neo_brightness = (uint16_t)b * 255 / 200;  // 0..255
-  strip.setBrightness((uint8_t)neo_brightness);
-  show_magenta();
+// ========== WEB SERVER ==========
+
+WebServer server(80);
+
+// Cache for IP / hostname (for HTML)
+String g_hostname;
+IPAddress g_ip;
+
+// Root handler: simple HTML page with TinZr info
+void handleRoot() {
+  String html;
+  html.reserve(512);
+
+  html += F("<!DOCTYPE html><html><head>"
+            "<meta charset='utf-8'/>"
+            "<meta http-equiv='refresh' content='2'/>"
+            "<title>TinZr Board</title>"
+            "<style>body{font-family:monospace;background:#f7f7f7;padding:1rem;}h1{color:#333;}</style>"
+            "</head><body>");
+
+  html += F("<h1>TinZr Device</h1>");
+  html += F("<p><b>Hostname:</b> ");
+  html += g_hostname;
+  html += F("</p><p><b>IP:</b> ");
+  html += g_ip.toString();
+  html += F("</p>");
+
+  html += F("<p>This is a simple TinZr WiFi/WebServer test page.<br>"
+            "The Python GUI can use this page to detect devices on the network.</p>");
+
+  html += F("</body></html>");
+
+  server.send(200, "text/html; charset=utf-8", html);
 }
 
-// ========== MAIN CODE SETTINGS ENDS ==========
+void handleNotFound() {
+  server.send(404, "text/plain", "Not found");
+}
 
-
-
+// ========== SETUP ==========
 
 void setup() {
   Serial.begin(115200);
-  delay(200);
+  delay(300);
+  Serial.println("🚀 TinZr WiFi + WebServer test booting...");
 
-  // Button
-  pinMode(PB_PIN, INPUT_PULLUP);
+  // LED init
+  pixels.begin();
+  setColor(0, 0, 0);
 
-  // NeoPixel init
-  strip.begin();
-  strip.clear();
-  strip.setBrightness(0);   // start at first step (0)
-  show_magenta();
-  set_brightness_0_200(BR_STEPS[br_idx]);
-  Serial.println("🔘 Pushbutton cycles MAGENTA brightness: 0 → 50 → 100 → 150 → 200 → 0 …");
-  Serial.printf("   Current brightness: %u\n", BR_STEPS[br_idx]);
+  // ---- WiFi setup (IMU-style logic, no TinZrConsole.begin) ----
+  WiFi.mode(WIFI_STA);
 
-  // TinZr console + OTA
-  Console.begin(DEF);
+  // Hostname from DEF.hostname (patched by your flasher)
+  if (WIFI_HOSTNAME && strlen(WIFI_HOSTNAME) > 0) {
+    WiFi.setHostname(WIFI_HOSTNAME);
+  }
 
+  Serial.print("📶 Connecting to SSID: ");
+  Serial.println(WIFI_SSID);
+
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  WiFi.setTxPower(WIFI_POWER_8_5dBm);  // Moderate TX power
+
+  // Blink red while connecting
+  while (WiFi.status() != WL_CONNECTED) {
+    setColor(64, 0, 0);  // Red
+    Serial.print("⏳ Connecting... Status: ");
+    Serial.println(WiFi.status());
+    delay(300);
+    setColor(0, 0, 0);
+    delay(500);
+  }
+
+  // Connected
+  g_ip = WiFi.localIP();
+  g_hostname = WIFI_HOSTNAME;
+
+  Serial.println("✅ WiFi connected!");
+  Serial.print("📡 IP address: ");
+  Serial.println(g_ip);
+  Serial.print("🧷 Hostname: ");
+  Serial.println(g_hostname);
+
+  setColor(0, 0, 255);  // Blue
+
+  // ---- Web server setup ----
+  server.on("/", handleRoot);
+  server.onNotFound(handleNotFound);
+  server.begin();
+  Serial.println("🌐 Web server started on port 80");
 }
 
+// ========== LOOP ==========
+
 void loop() {
-    
-  // Keep OTA + console alive
-  Console.handle();
+  // Serve HTTP requests
+  server.handleClient();
 
-
-
-
-
-  // ============== MAIN CODE STARTS ============== 
-  // Button (falling-edge detect with debounce)
-  bool btn = digitalRead(PB_PIN); // HIGH=idle, LOW=pressed
-  unsigned long now = millis();
-
-  if (btn_prev && !btn && (now - last_edge_ms) > 25) { // 25 ms debounce
-    last_edge_ms = now;
-
-    // Next brightness step
-    br_idx = (br_idx + 1) % N_STEPS;
-    set_brightness_0_200(BR_STEPS[br_idx]);
-
-    Serial.printf("🎛️ Brightness → %u (NeoPixel brightness=%u/255)\n",
-                  BR_STEPS[br_idx],
-                  (unsigned)((uint16_t)BR_STEPS[br_idx] * 255 / 200));
-  }
-  btn_prev = btn;
-  // ============== MAIN CODE ENDS ============== 
-
-
+  // Optionally you can blink or animate LED here if you want.
+  // For now, keep it solid blue when connected.
 }

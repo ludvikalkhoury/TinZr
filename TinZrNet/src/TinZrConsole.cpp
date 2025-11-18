@@ -1,4 +1,6 @@
 #include "TinZrConsole.h"
+#include "TinZrCore.h"   
+#include "TinZrConnect.h"   // 🔹 add this
 
 static inline void _wifi_ram_only() {
   WiFi.persistent(false);
@@ -119,8 +121,29 @@ void TinZrConsole::printHelp(bool with_header) {
                  _autosave_wifi ? "auto-saves + reboots" : "RAM only; use SAVE to persist");
   Serial.println("  STATIC ON | STATIC OFF");
   Serial.println("  HOST <name>");
-  Serial.println("  SAVE | LOAD | WIPE | WIPEWIFI | SHOW | REBOOT\n");
+  Serial.println("  SAVE | LOAD | WIPE | WIPEWIFI | SHOW | REBOOT");
+  Serial.println();
+  Serial.println("TinZrCore control:");
+  Serial.println("  LED <r> <g> <b> [brightness 0-255]");
+  Serial.println("  LED OFF");
+  Serial.println("  VBAT          (show battery voltage & %)");
+  Serial.println("  BAT           (alias of VBAT)");
+  Serial.println("  BAT LEVEL     (alias of VBAT)");
+  Serial.println("  SOFTOFF       (TinZrCore::softOff)");
+  Serial.println("  SOFTON        (TinZrCore::softOn)");
+  Serial.println();
+  Serial.println("Pin I/O control:");
+  Serial.println("  DIG <pin> <HIGH|LOW|1|0>");
+  Serial.println("  ANA <pin> <value 0-255>   (PWM / analogWrite)");
+  Serial.println();
+  Serial.println("Network send (via TinZrConnect):");
+  Serial.println("  TCP <message>   (send message via TCP to all peers)");
+  Serial.println("  SEND <message>  (alias of TCP)");
+  Serial.println("  UDP <message>   (UDP broadcast/multicast to peers/hub)");
+  Serial.println();
 }
+
+
 
 void TinZrConsole::handleSerial() {
   if (!Serial.available()) return;
@@ -128,6 +151,135 @@ void TinZrConsole::handleSerial() {
   String cmd = Serial.readStringUntil('\n');
   cmd.trim();
   if (cmd.isEmpty()) return;
+
+  // ----- TinZrCore control: LED / battery / soft power -----
+
+  // LED OFF
+  if (cmd.equalsIgnoreCase("LED OFF")) {
+    if (_core) {
+      _core->ledOff();
+      Serial.println("💡 LED OFF");
+    } else {
+      Serial.println("⚠️ No TinZrCore attached (call attachCore() in setup).");
+    }
+    return;
+  }
+
+  // LED R G B [BRIGHTNESS]
+  if (cmd.startsWith("LED ")) {
+    if (!_core) {
+      Serial.println("⚠️ No TinZrCore attached (call attachCore() in setup).");
+      return;
+    }
+
+    int r = 0, g = 0, b = 0, br = 255;
+    // parse: LED  R  G  B  [BR]
+    int n = sscanf(cmd.c_str() + 4, "%d %d %d %d", &r, &g, &b, &br);
+    if (n < 3) {
+      Serial.println("❌ Usage: LED <r> <g> <b> [brightness 0-255]");
+      return;
+    }
+    r  = constrain(r,  0, 255);
+    g  = constrain(g,  0, 255);
+    b  = constrain(b,  0, 255);
+    br = constrain(br, 0, 255);
+
+    _core->setLED((uint8_t)r, (uint8_t)g, (uint8_t)b, (uint8_t)br);
+    Serial.printf("💡 LED set to (%d,%d,%d) @ %d\n", r, g, b, br);
+    return;
+  }
+
+  // VBAT / BAT / BAT LEVEL: show battery voltage / percentage
+  if (cmd.equalsIgnoreCase("VBAT") ||
+      cmd.equalsIgnoreCase("BAT") ||
+      cmd.equalsIgnoreCase("BAT LEVEL")) {
+    if (!_core) {
+      Serial.println("⚠️ No TinZrCore attached (call attachCore() in setup).");
+      return;
+    }
+    float v   = _core->readBatteryVoltage();
+    int   pct = _core->batteryPercent();
+    Serial.printf("🔋 Battery: %.3f V (%d %%)\n", v, pct);
+    return;
+  }
+
+  // SOFTOFF / SOFTON
+  if (cmd.equalsIgnoreCase("SOFTOFF")) {
+    if (!_core) {
+      Serial.println("⚠️ No TinZrCore attached (call attachCore() in setup).");
+      return;
+    }
+    Serial.println("🛌 TinZrCore softOff()");
+    _core->softOff();
+    return;
+  }
+
+  if (cmd.equalsIgnoreCase("SOFTON")) {
+    if (!_core) {
+      Serial.println("⚠️ No TinZrCore attached (call attachCore() in setup).");
+      return;
+    }
+    Serial.println("⚡ TinZrCore softOn()");
+    _core->softOn();
+    return;
+  }
+
+  // ------------------------------------------------------------
+  // Pin I/O control: DIG / ANA
+  // ------------------------------------------------------------
+
+  // Digital write: DIG <pin> <HIGH|LOW|1|0>
+  if (cmd.startsWith("DIG ")) {
+    int pin;
+    char levelStr[8] = {0};
+
+    int n = sscanf(cmd.c_str() + 4, "%d %7s", &pin, levelStr);
+    if (n < 2) {
+      Serial.println("❌ DIG cmd: expected DIG <pin> <HIGH|LOW|1|0>");
+      return;
+    }
+
+    int val = -1;
+    if (!strcasecmp(levelStr, "HIGH") || !strcmp(levelStr, "1")) {
+      val = HIGH;
+    } else if (!strcasecmp(levelStr, "LOW") || !strcmp(levelStr, "0")) {
+      val = LOW;
+    }
+
+    if (val == -1) {
+      Serial.println("❌ DIG cmd: level must be HIGH/LOW/1/0");
+      return;
+    }
+
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, val);
+
+    Serial.printf("↪️  DIG pin %d -> %s\n", pin, (val == HIGH ? "HIGH" : "LOW"));
+    return;
+  }
+
+  // Analog / PWM write: ANA <pin> <value>
+  if (cmd.startsWith("ANA ")) {
+    int pin;
+    int value;
+
+    int n = sscanf(cmd.c_str() + 4, "%d %d", &pin, &value);
+    if (n < 2) {
+      Serial.println("❌ ANA cmd: expected ANA <pin> <value>");
+      return;
+    }
+
+    value = constrain(value, 0, 255);  // tweak if you want 0–4095
+
+    analogWrite(pin, value);
+
+    Serial.printf("↪️  ANA pin %d -> %d\n", pin, value);
+    return;
+  }
+
+  // ------------------------------------------------------------
+  // Wi-Fi / config commands
+  // ------------------------------------------------------------
 
   if (cmd.startsWith("WIFI ")) {
     int sp = cmd.indexOf(' ', 5);
@@ -206,6 +358,58 @@ void TinZrConsole::handleSerial() {
     return;
   }
 
+  // ------------------------------------------------------------
+  // TCP / SEND  —  send message to PC Hub or peers
+  // ------------------------------------------------------------
+  if (cmd.startsWith("TCP ") || cmd.startsWith("SEND ")) {
+
+    if (!_net) {
+      Serial.println("⚠️ No TinZrConnect attached (call attachNet()).");
+      return;
+    }
+
+    String msg;
+    if (cmd.startsWith("TCP "))
+      msg = cmd.substring(4);
+    else
+      msg = cmd.substring(5);
+
+    msg.trim();
+    if (msg.isEmpty()) {
+      Serial.println("❌ Usage: TCP <message>");
+      return;
+    }
+
+    int sent = _net->sendTCP(msg);
+    Serial.printf("📤 Sent to %d peer(s): %s\n", sent, msg.c_str());
+    return;
+  }
+
+  // ------------------------------------------------------------
+  // UDP  —  broadcast message to hub / peers
+  // ------------------------------------------------------------
+  if (cmd.startsWith("UDP ")) {
+
+    if (!_net) {
+      Serial.println("⚠️ No TinZrConnect attached (call attachNet()).");
+      return;
+    }
+
+    String msg = cmd.substring(4);
+    msg.trim();
+    if (msg.isEmpty()) {
+      Serial.println("❌ Usage: UDP <message>");
+      return;
+    }
+
+    _net->sendUDP(msg);
+    Serial.printf("📡 UDP broadcast: %s\n", msg.c_str());
+    return;
+  }
+
+  // ------------------------------------------------------------
+  // Unknown command → show mini help
+  // ------------------------------------------------------------
   Serial.println("❓ Unknown command.");
   printHelp(false);
 }
