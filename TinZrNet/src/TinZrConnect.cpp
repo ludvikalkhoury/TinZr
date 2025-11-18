@@ -28,25 +28,44 @@ bool TinZrConnect::start(uint16_t tcpPort, uint16_t udpPort, IPAddress mcast) {
   return true;
 }
 
+
 void TinZrConnect::handle() {
-  // Periodic HELLO (1/s) so peers can discover each other
-  if (millis() - _lastHello > 1000) {
-    _lastHello = millis();
-    _sayHello();
+  // Do nothing if Wi-Fi is not connected
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
   }
 
+  // Handle incoming UDP + TCP
   _recvUDP();
   _acceptTCP();
 }
 
-void TinZrConnect::broadcast(const uint8_t* data, size_t len) {
-  // No beginPacketMulticast in your core → use beginPacket(group, port)
+
+void TinZrConnect::sendUDP(const uint8_t* data, size_t len) {
+  // Don’t send if Wi-Fi is down
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+
+  // Send to multicast group
   _udp.beginPacket(_mcast, _udpPort);
   _udp.write(data, len);
   _udp.endPacket();
+  
+  // (Optional) also send directly to all known peers via UDP
+  for (size_t i = 0; i < _peerCount; ++i) {
+    _udp.beginPacket(_peers[i].ip, _udpPort);
+    _udp.write(data, len);
+    _udp.endPacket();
+  }
 }
 
-int TinZrConnect::sendToAll(const uint8_t* data, size_t len, uint32_t timeoutMs) {
+
+
+int TinZrConnect::sendTCP(const uint8_t* data, size_t len, uint32_t timeoutMs) {
+  
+  if (WiFi.status() != WL_CONNECTED) return false;
+  
   int sent = 0;
   for (size_t i = 0; i < _peerCount; ++i) {
     WiFiClient c;
@@ -63,12 +82,30 @@ int TinZrConnect::sendToAll(const uint8_t* data, size_t len, uint32_t timeoutMs)
 // ❌ Remove stray standalone declaration — it caused the '-fpermissive' error
 // void TinZrConnect::onMessage(MsgHandler cb);
 
-void TinZrConnect::_sayHello() {
+void TinZrConnect::_sendDiscovery() {
   const char msg[] = "HELLO";
+
+  // 1) Multicast HELLO (routers / tools that listen on 239.1.1.1:4210)
   _udp.beginPacket(_mcast, _udpPort);
-  _udp.write((const uint8_t*)msg, sizeof(msg)-1);
+  _udp.write((const uint8_t*)msg, sizeof(msg) - 1);
   _udp.endPacket();
+
+  // 2) Unicast HELLO directly to your PC (set IP below!)
+  IPAddress hub(172, 20, 10, 4);   // <--- PC IP
+  _udp.beginPacket(hub, _udpPort);
+  _udp.write((const uint8_t*)msg, sizeof(msg) - 1);
+  _udp.endPacket();
+
+  // Optional: global broadcast as a fallback
+  IPAddress bcast(255, 255, 255, 255);
+  _udp.beginPacket(bcast, _udpPort);
+  _udp.write((const uint8_t*)msg, sizeof(msg) - 1);
+  _udp.endPacket();
+
+  Serial.println("TinZrConnect: sent HELLO (multicast + unicast + broadcast)");
 }
+
+
 
 void TinZrConnect::_recvUDP() {
   int pktLen = _udp.parsePacket();

@@ -66,8 +66,8 @@ NOTES
 TinZrConsoleDefaults DEF = {
   .ssid       = "Ludvik",
   .pass       = "Lud12345",
-  .hostname   = "esp32c3-ota",
-  .use_static = false
+  .hostname   = "TinZr-ota",
+  .use_static = true
 };
 
 TinZrConsole Console;

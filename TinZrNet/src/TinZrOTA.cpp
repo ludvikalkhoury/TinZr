@@ -1,4 +1,5 @@
 #include "TinZrOTA.h"
+#include "TinZrCore.h"   
 
 // ==================== Public API ====================
 
@@ -10,11 +11,9 @@ void TinZrOTA::begin(const char* hostname, const TinZrCfg& cfg, uint32_t connect
   Serial.println("\n🚀 TinZrOTA boot");
 
 #ifdef PIN_RGB_LED
-  if (_cfg.led_enable) {
-    ledBegin();
-    ledSetState(LedState::SEARCHING);   // rainbow while we connect
-  }
+  if (_cfg.led_enable) ledSetState(LedState::SUCCESS_STROBE);
 #endif
+
 
   connectWiFi();   // blocks up to _connectTimeoutMs
   setupOTA();      // safe to call even if not connected yet
@@ -143,63 +142,82 @@ void TinZrOTA::setupOTA() {
   Serial.println("🌐 OTA ready (IDE Network Upload / espota.py)");
 }
 
-// ==================== LED Animator (inline) ====================
+
+// ==================== LED Animator (via TinZrCore) ====================
 #ifdef PIN_RGB_LED
 
 void TinZrOTA::ledBegin() {
-  _px.begin();
-  _px.setBrightness(_cfg.led_brightness);
-  _px.show();
   _ledState = LedState::OFF;
-  _ledT = 0;
-  _phase = 0;
-  _succCnt = 0;
+  _ledT     = 0;
+  _phase    = 0;
+  _succCnt  = 0;
+  TinZr.ledOff();
 }
 
 void TinZrOTA::ledSetState(LedState s) {
   if (_ledState == s) return;
-  _ledState = s;
-  _ledT = 0;
-  _phase = 0;
-  _succCnt = 0;
 
-  if (s == LedState::OFF)                  ledSetRGB(0,0,0);
-  else if (s == LedState::SUCCESS_STEADY)  ledSetRGB(0,255,0);
+  _ledState = s;
+  _ledT     = 0;
+  _phase    = 0;
+  _succCnt  = 0;
+
+  switch (s) {
+    case LedState::OFF:
+      TinZr.ledOff();
+      break;
+
+    case LedState::SUCCESS_STEADY:
+      // steady green
+      ledSetRGB(0, 255, 0);
+      break;
+
+    default:
+      // animated states handled in ledUpdate()
+      break;
+  }
 }
 
 void TinZrOTA::ledUpdate() {
   uint32_t now = millis();
+
   switch (_ledState) {
     case LedState::SEARCHING: {
       // Smooth rainbow: advance every ~15 ms
       if (now - _ledT < 15) return;
-      _ledT = now;
-      _phase = (_phase + 1) & 0xFF;                   // 0..255
-      _px.setPixelColor(0, wheel(_px, (uint8_t)_phase));
-      _px.show();
+      _ledT  = now;
+      _phase = (_phase + 1) & 0xFF;   // 0..255
+
+      uint8_t r, g, b;
+      wheel((uint8_t)_phase, r, g, b);
+      ledSetRGB(r, g, b);
     } break;
 
     case LedState::SUCCESS_STROBE: {
       // 5× green blinks, 150ms on / 150ms off, then steady green
-      const uint16_t onMs = 150, offMs = 150;
+      const uint16_t onMs  = 150;
+      const uint16_t offMs = 150;
+
       if (_phase == 0) {
-        ledSetRGB(0,255,0);
-        _phase = 1; _ledT = now;
+        ledSetRGB(0, 255, 0);
+        _phase = 1;
+        _ledT  = now;
       } else if (_phase == 1 && now - _ledT >= onMs) {
-        ledSetRGB(0,0,0);
-        _phase = 2; _ledT = now;
+        ledSetRGB(0, 0, 0);
+        _phase = 2;
+        _ledT  = now;
       } else if (_phase == 2 && now - _ledT >= offMs) {
         _succCnt++;
         if (_succCnt >= 5) {
           ledSetState(LedState::SUCCESS_STEADY);
         } else {
-          _phase = 0; // next blink
+          _phase = 0;   // next blink
         }
       }
     } break;
 
     case LedState::SUCCESS_STEADY:
-      // steady green already set in ledSetState
+      // nothing: already set in ledSetState
       break;
 
     case LedState::FAIL_BLINK: {
@@ -207,6 +225,7 @@ void TinZrOTA::ledUpdate() {
       const uint16_t half = 300;
       if (now - _ledT < half) return;
       _ledT = now;
+
       static bool on = false;
       on = !on;
       ledSetRGB(on ? 255 : 0, 0, 0);
@@ -214,18 +233,33 @@ void TinZrOTA::ledUpdate() {
 
     case LedState::OFF:
     default:
+      // do nothing
       break;
   }
 }
 
 void TinZrOTA::ledSetRGB(uint8_t r, uint8_t g, uint8_t b) {
-  _px.setPixelColor(0, _px.Color(r,g,b));
-  _px.show();
+  // Delegate to Core – it owns the NeoPixel and brightness
+  TinZr.setLED(r, g, b, _cfg.led_brightness);
 }
 
-uint32_t TinZrOTA::wheel(Adafruit_NeoPixel& p, uint8_t pos) {
-  if (pos < 85)  return p.Color(pos * 3, 255 - pos * 3, 0);
-  if (pos < 170) { pos -= 85; return p.Color(255 - pos * 3, 0, pos * 3); }
-  pos -= 170;    return p.Color(0, pos * 3, 255 - pos * 3);
+void TinZrOTA::wheel(uint8_t pos, uint8_t& r, uint8_t& g, uint8_t& b) {
+  // Same color logic as before, but now returns r,g,b instead of a packed uint32_t
+  if (pos < 85) {
+    r = pos * 3;
+    g = 255 - pos * 3;
+    b = 0;
+  } else if (pos < 170) {
+    pos -= 85;
+    r = 255 - pos * 3;
+    g = 0;
+    b = pos * 3;
+  } else {
+    pos -= 170;
+    r = 0;
+    g = pos * 3;
+    b = 255 - pos * 3;
+  }
 }
-#endif
+
+#endif  // PIN_RGB_LED

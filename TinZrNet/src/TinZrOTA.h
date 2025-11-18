@@ -2,9 +2,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <ArduinoOTA.h>
-#ifdef PIN_RGB_LED
-  #include <Adafruit_NeoPixel.h>
-#endif
+
 
 // External config struct (not nested!)
 struct TinZrCfg {
@@ -19,7 +17,7 @@ struct TinZrCfg {
   const char* ota_password = nullptr;     // default: none
   uint16_t    ota_port     = 3232;
   wifi_power_t tx_power    = WIFI_POWER_8_5dBm;
-  uint8_t led_brightness = 150;
+  uint8_t led_brightness   = 25;
   bool led_enable = true;
 };
 
@@ -29,6 +27,18 @@ public:
   void handle();
 
   bool        connected() const { return WiFi.status() == WL_CONNECTED; }
+  
+  // "Ready" = Wi-Fi connected AND LED is in steady-success state
+  bool        ready() const {
+  #ifdef PIN_RGB_LED
+    return (_connState == CONNECTED) && (_ledState == LedState::SUCCESS_STEADY);
+  #else
+    // If no LED, just use connection state
+    return (_connState == CONNECTED);
+  #endif
+  }
+    
+  
   IPAddress   ip()        const { return WiFi.localIP(); }
   const String& host()    const { return _hostname; }
 
@@ -55,17 +65,24 @@ private:
   unsigned long _lastReconnect = 0;
 
 #ifdef PIN_RGB_LED
-  enum class LedState : uint8_t { OFF=0, SEARCHING, SUCCESS_STROBE, SUCCESS_STEADY, FAIL_BLINK };
-  Adafruit_NeoPixel _px{1, PIN_RGB_LED, NEO_GRB + NEO_KHZ800};
+  enum class LedState : uint8_t {
+    OFF = 0,
+    SEARCHING,
+    SUCCESS_STROBE,
+    SUCCESS_STEADY,
+    FAIL_BLINK
+  };
+
   LedState  _ledState = LedState::OFF;
-  uint32_t  _ledT = 0;
-  uint16_t  _phase = 0;
-  uint8_t   _succCnt = 0;
+  uint32_t  _ledT     = 0;
+  uint16_t  _phase    = 0;
+  uint8_t   _succCnt  = 0;
 
   void ledBegin();
   void ledSetState(LedState s);
   void ledUpdate();
   void ledSetRGB(uint8_t r, uint8_t g, uint8_t b);
-  static uint32_t wheel(Adafruit_NeoPixel& p, uint8_t pos);
+  // Compute an RGB from a 0–255 phase value
+  static void wheel(uint8_t pos, uint8_t& r, uint8_t& g, uint8_t& b);
 #endif
 };

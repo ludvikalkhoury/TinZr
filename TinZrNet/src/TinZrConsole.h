@@ -5,6 +5,10 @@
 #include <esp_wifi.h>
 #include "TinZrOTA.h"
 
+class TinZrCore; 
+class TinZrConnect;   
+
+
 // Optional knobs for default behavior
 #ifndef TINZR_AUTOSAVE_WIFI_ON
 #define TINZR_AUTOSAVE_WIFI_ON true   // true = WIFI command will save+reboot
@@ -16,6 +20,8 @@ struct TinZrConsoleDefaults {
   const char* hostname   = "esp32c3-ota";
   bool        use_static = false;
 };
+
+
 
 class TinZrConsole {
 public:
@@ -29,15 +35,27 @@ public:
 
   // Change policy at runtime
   void setAutosaveWifi(bool on) { _autosave_wifi = on; }
-
+    
+  void attachNet(TinZrConnect* net) { _net = net; }
+  
   // Expose connection helpers
   bool connected() const { return _ota.connected(); }
+  bool ready() const { return _ota.ready(); }
+  
   IPAddress ip() const { return _ota.ip(); }
+    
+  
+  void attachCore(TinZrCore* core) { _core = core; }    
+  
+  
 
+    
 private:
   // State
   TinZrOTA     _ota;
   Preferences  _prefs;
+  TinZrCore*   _core = nullptr; 
+  TinZrConnect* _net = nullptr;    
 
   String  _ssid;
   String  _pass;

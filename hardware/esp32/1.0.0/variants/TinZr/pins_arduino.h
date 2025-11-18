@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include "soc/soc_caps.h"
 
-// ===== Built-in RGB (WS2812C) on GPIO8 =====
+// ===== Built-in RGB on GPIO8 =====
 #define PIN_RGB_LED 8
 #define PB_PIN 9
 

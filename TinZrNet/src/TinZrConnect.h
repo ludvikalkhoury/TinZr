@@ -16,21 +16,24 @@ public:
              uint16_t udpPort = 4210,
              IPAddress mcast = IPAddress(239,0,0,222));
 
-  void handle();                           // call in loop()
+  void handle( );                           // call in loop()
 
   // Best-effort UDP multicast
-  void broadcast(const uint8_t* data, size_t len);
-  void broadcast(const String& s) { broadcast((const uint8_t*)s.c_str(), s.length()); }
+  void sendUDP(const uint8_t* data, size_t len);
+  void sendUDP(const String& s) { sendUDP((const uint8_t*)s.c_str(), s.length()); }
 
   // Reliable TCP send to all known peers; returns count delivered
-  int  sendToAll(const uint8_t* data, size_t len, uint32_t timeoutMs = 200);
-  int  sendToAll(const String& s, uint32_t timeoutMs = 200) { return sendToAll((const uint8_t*)s.c_str(), s.length(), timeoutMs); }
+  int  sendTCP(const uint8_t* data, size_t len, uint32_t timeoutMs = 200);
+  int  sendTCP(const String& s, uint32_t timeoutMs = 200) { return sendTCP((const uint8_t*)s.c_str(), s.length(), timeoutMs); }
 
   // Register inbound message callback (fires for UDP + TCP)
   void onMessage(MsgHandler cb) { _onMsg = cb; }
 
   // Peer info
   size_t peerCount() const { return _peerCount; }
+  
+  void sendDiscovery() { _sendDiscovery(); }
+    
 
 private:
   struct Peer { IPAddress ip; uint32_t lastSeen; };
@@ -47,7 +50,7 @@ private:
   MsgHandler _onMsg = nullptr;
   uint32_t _lastHello = 0;
 
-  void _sayHello();                        // multicast presence
+  void _sendDiscovery();                   // multicast presence
   void _recvUDP();                         // handle discovery + datagrams
   void _acceptTCP();                       // accept and read clients
   void _learnPeer(IPAddress ip);
