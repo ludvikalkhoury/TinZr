@@ -22,8 +22,8 @@ class TinZrComCenterApp:
 		self.tab_devices = DevicesTab(self.notebook, app=self)
 		self.tab_hub     = HubTab(self.notebook, app=self)
 
-		self.notebook.add(self.tab_flasher, text="Flasher")
-		self.notebook.add(self.tab_devices, text="Devices")
+		#self.notebook.add(self.tab_flasher, text="Flasher")
+		#self.notebook.add(self.tab_devices, text="Devices")
 		self.notebook.add(self.tab_hub,     text="Hub")
 
 

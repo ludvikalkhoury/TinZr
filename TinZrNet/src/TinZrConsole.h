@@ -37,7 +37,9 @@ public:
   void setAutosaveWifi(bool on) { _autosave_wifi = on; }
     
   void attachNet(TinZrConnect* net) { _net = net; }
-  
+
+  const String& getHostname() const { return _host; }
+      
   // Expose connection helpers
   bool connected() const { return _ota.connected(); }
   bool ready() const { return _ota.ready(); }

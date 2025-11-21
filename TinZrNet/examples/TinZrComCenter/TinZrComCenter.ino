@@ -41,7 +41,7 @@ void setup()
 
 	// Link console to core AND net so it can control LED, battery, soft power, and TCP/UDP
 	Console.attachCore(&TinZr);
-	Console.attachNet(&Net);     // 👈👈 THIS is the missing piece
+	Console.attachNet(&Net);      
 	Console.begin(DEF);          // brings up Wi-Fi + OTA using defaults or NVS
 
 
@@ -60,44 +60,53 @@ void setup()
    		Serial.println("❌ TinZrConnect.start() failed (Wi-Fi not connected?)");
 	} else {
 			Serial.println("🚀 TinZrConnect started");
+			Net.attachConsole(&Console);
+			Net.setHubIP(IPAddress(172, 20, 10, 4));   // or whatever the PC IP is
 			Net.sendDiscovery();
+			
 			// HubCmd already registered its callback in its constructor
 	}
 
-
 }
+
+
 
 void loop()
 {
-	// Core: handle button + soft power (long-press, soft-off, etc.)
-	TinZr.handle();
+    // Always run core so it can handle the power button / long-press logic
+    TinZr.handle();
 
-	// Console: OTA + Wi-Fi state machine
-	Console.handle();
+    // If we're in soft-off state, do nothing else
+    if (!TinZr.isSoftOn()) {
+        return;
+    }
 
-	// Only when Wi-Fi + LED are “ready”
-	if (Console.ready()) {
-		// Pump networking (RX only; no periodic HELLO, no STATUS)
-		Net.handle();
+    // Console: OTA + Wi-Fi state machine
+    Console.handle();
 
-		// --- BUTTON → send LED state to hub on press edge ---
-		static bool lastPressed = false;
-		bool pressed = (digitalRead(PB_PIN) == LOW);   // active-low button
+    // Only when Wi-Fi + LED are “ready”
+    if (Console.ready()) {
+        // Pump networking (RX only; no periodic HELLO, no STATUS)
+        Net.handle();
 
-		if (pressed && !lastPressed) {
-			// Falling edge: button just pressed
-			char buf[64];
-			snprintf(buf, sizeof(buf),
-			        "BTN LED %u %u %u %u",
-							(unsigned)HubCmd.ledR(),
-							(unsigned)HubCmd.ledG(),
-							(unsigned)HubCmd.ledB(),
-							(unsigned)HubCmd.ledBr());
+        // --- BUTTON → send LED state to hub on press edge ---
+        static bool lastPressed = false;
+        bool pressed = (digitalRead(PB_PIN) == LOW);   // active-low button
 
-			Serial.print("📤 Button press → sending: ");
-			Serial.println(buf);
-			Net.sendTCP((const uint8_t*)buf, strlen(buf));
-		}
-		lastPressed = pressed;
-	}
+        if (pressed && !lastPressed) {
+            char buf[64];
+            snprintf(buf, sizeof(buf),
+                     "BTN LED %u %u %u %u",
+                     (unsigned)HubCmd.ledR(),
+                     (unsigned)HubCmd.ledG(),
+                     (unsigned)HubCmd.ledB(),
+                     (unsigned)HubCmd.ledBr());
+
+            Serial.print("📤 Button press → sending: ");
+            Serial.println(buf);
+            Net.sendTCP((const uint8_t*)buf, strlen(buf));
+        }
+        lastPressed = pressed;
+    }
 }
+

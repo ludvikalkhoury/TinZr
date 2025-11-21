@@ -76,7 +76,7 @@ class HubTab(ttk.Frame):
         tk.Entry(grid, textvariable=self.mcast_var, width=16).grid(row=2, column=1, sticky="w", padx=4)
 
         # Kept for compatibility; not used in this simplified UDP-first hub
-        self.relay_var = tk.BooleanVar(value=False)
+        self.relay_var = tk.BooleanVar(value=True)
         tk.Checkbutton(
             left,
             text="Relay TinZr→TinZr messages via hub (TCP; optional)",
@@ -166,6 +166,48 @@ class HubTab(ttk.Frame):
 
         # UDP send socket
         self.send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        
+        # Allow broadcast and kick off discovery burst
+        try:
+            self.send_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        except OSError:
+            pass
+
+        threading.Thread(target=self._discovery_burst, daemon=True).start()
+    
+    
+    
+    
+    def _discovery_burst(self):
+        """
+        On hub startup, send a few HUB-QUERY packets via multicast and broadcast
+        so silent nodes will announce themselves with HELLO.
+        """
+        msg = b"HUB-QUERY"
+        for i in range(5):  # try 5 times over ~5 seconds
+            if not self.running or self.send_sock is None:
+                break
+            try:
+                # Multicast query
+                try:
+                    self.send_sock.sendto(msg, (self.mcast_group, self.udp_port))
+                except OSError as e:
+                    self._log(f"[DISCOVERY] Multicast HUB-QUERY failed: {e}")
+
+                # Broadcast query
+                try:
+                    self.send_sock.sendto(msg, ("255.255.255.255", self.udp_port))
+                except OSError as e:
+                    self._log(f"[DISCOVERY] Broadcast HUB-QUERY failed: {e}")
+
+                self._log(f"[DISCOVERY] Sent HUB-QUERY burst {i+1}/5")
+            except Exception as e:
+                self._log(f"[DISCOVERY] Error during HUB-QUERY burst: {e}")
+                break
+
+            time.sleep(1.0)
+
+
 
     def on_stop_hub(self):
         if not self.running:
@@ -195,9 +237,8 @@ class HubTab(ttk.Frame):
             pass
         self.send_sock = None
 
-        with self.peers_lock:
-            self.peers.clear()
-        self._update_peers_list()
+
+
 
         self.start_button.config(state="normal")
         self.stop_button.config(state="disabled")
@@ -240,16 +281,20 @@ class HubTab(ttk.Frame):
             text = data.decode("utf-8", errors="replace").strip()
             self._log(f"[UDP RX] from {ip}:{port} -> {text!r}")
 
-            # Learn/update peer
-            self._learn_peer(ip)
-
-            # Optionally respond to HELLO like a classic hub
-            if text == "HELLO":
+            # HELLO from node: "HELLO" or "HELLO <name>"
+            if text.startswith("HELLO"):
+                parts = text.split(maxsplit=1)
+                name = parts[1] if len(parts) > 1 else None
+                self._learn_peer(ip, name)
                 try:
                     sock.sendto(b"HUB-ACK", addr)
                     self._log(f"[UDP]  -> Sent HUB-ACK to {ip}:{port}")
                 except OSError as e:
                     self._log(f"[UDP]  -> Failed to send HUB-ACK to {ip}: {e}")
+            else:
+                # normal message: just update last_seen
+                self._learn_peer(ip)
+
 
         try:
             sock.close()
@@ -315,10 +360,15 @@ class HubTab(ttk.Frame):
     # ------------------------------------------------------------------
     # Peer tracking + sending
     # ------------------------------------------------------------------
-    def _learn_peer(self, ip: str):
+    def _learn_peer(self, ip: str, name: str | None = None):
         with self.peers_lock:
-            self.peers[ip] = {"last_seen": time.time()}
+            entry = self.peers.get(ip, {"last_seen": time.time(), "name": None})
+            entry["last_seen"] = time.time()
+            if name is not None:
+                entry["name"] = name
+            self.peers[ip] = entry
         self._update_peers_list()
+
 
     def _send_udp_to_ip(self, ip: str, data: bytes):
         if self.send_sock is None:
@@ -390,7 +440,9 @@ class HubTab(ttk.Frame):
                 with self.peers_lock:
                     for ip, info in self.peers.items():
                         age = time.time() - info["last_seen"]
-                        label = f"{ip}  (seen {age:0.1f}s ago)"
+                        name = info.get("name") or "TinZr"
+                        label = f"{name} [{ip}]  (seen {age:0.1f}s ago)"
                         self.peers_list.insert("end", label)
+
 
         self.after(100, self._poll_queues)
