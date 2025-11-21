@@ -64,7 +64,8 @@ void TinZrHubCommands::handleNetMessage(IPAddress from, const uint8_t* data, siz
   }
 
   // Battery query: "BAT", "BAT LEVEL", "BAT VOLT", etc.
-  if (s.startsWith("BAT")) {
+  if (s.equalsIgnoreCase("BAT")) {
+    // ❗ Command from PC: reply once
     _cmdBattery();
     return;
   }

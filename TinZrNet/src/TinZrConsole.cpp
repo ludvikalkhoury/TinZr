@@ -10,28 +10,63 @@ static inline void _wifi_ram_only() {
   WiFi.setSleep(false);
 }
 
+
+
 void TinZrConsole::begin(const TinZrConsoleDefaults& def, uint32_t connect_timeout_ms) {
   Serial.println("\n=== TinZr Serial Config (library) ===");
 
   _wifi_ram_only();
 
-  // defaults (RAM)
-  _ssid = def.ssid ? def.ssid : "";
-  _pass = def.pass ? def.pass : "";
-  _host = def.hostname ? def.hostname : "tinzr";
-  _use_static = def.use_static;
+  // 1) Start with hardcoded defaults
+  _ssid       = "";
+  _pass       = "";
+  _host       = "tinzr";
+  _use_static = false;
 
-  // load persisted values, if present
-  if (loadFromNVS()) {
-    Serial.println("Auto-loaded saved settings.");
+  // 2) Try to load whatever we have from NVS
+  _prefs.begin("tinzr_cfg", true);
+  if (_prefs.isKey("ssid")) {
+    _ssid = _prefs.getString("ssid", _ssid);
+  }
+  if (_prefs.isKey("pass")) {
+    _pass = _prefs.getString("pass", _pass);
+  }
+  if (_prefs.isKey("host")) {
+    String savedHost = _prefs.getString("host", _host);
+    if (savedHost.length() > 0) {
+      _host = savedHost;
+    }
+  }
+  if (_prefs.isKey("use_static")) {
+    _use_static = _prefs.getUChar("use_static", 0) != 0;
+  }
+  _prefs.end();
+
+  // 3) Override with DEF *if provided* (DEF wins over NVS)
+  if (def.ssid && def.ssid[0]) {
+    _ssid = def.ssid;
+  }
+  if (def.pass && def.pass[0]) {
+    _pass = def.pass;
+  }
+  if (def.hostname && def.hostname[0]) {
+    _host = def.hostname;
   }
 
-  // show help
-  printHelp(false);
+  // For use_static, you said: "I want ssid and pass and static to be the same I provided"
+  // → Always take from DEF.
+  _use_static = def.use_static;
 
-  // bring up OTA with current RAM settings
+  // 4) Save the resulting config back to NVS so it becomes the new default
+  saveToNVS();
+
+  // 5) Show help + bring up WiFi/OTA with the final settings
+  printHelp(false);
   applyConfig(connect_timeout_ms);
 }
+
+
+
 
 void TinZrConsole::handle() {
   handleSerial();
@@ -45,6 +80,9 @@ void TinZrConsole::applyConfig(uint32_t connect_timeout_ms) {
   if (!_use_static) {
     WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE);
   }
+  
+  WiFi.setHostname(_host.c_str());
+  
   delay(50);
 
   // Re-init TinZrOTA so LED state machine restarts (rainbow → success)
@@ -69,19 +107,35 @@ void TinZrConsole::saveToNVS() {
   Serial.println("💾 Saved to NVS.");
 }
 
+
+
 bool TinZrConsole::loadFromNVS() {
   _prefs.begin("tinzr_cfg", true);
-  bool ok = _prefs.isKey("ssid") && _prefs.isKey("pass") && _prefs.isKey("host");
+
+  bool ok = _prefs.isKey("ssid") && _prefs.isKey("pass");
   if (ok) {
     _ssid       = _prefs.getString("ssid", _ssid);
     _pass       = _prefs.getString("pass", _pass);
     _use_static = _prefs.getUChar("use_static", 0) != 0;
-    _host       = _prefs.getString("host", _host);
+
+    if (_prefs.isKey("host")) {
+      String savedHost = _prefs.getString("host", "");
+      if (savedHost.length() > 0) {
+        _host = savedHost;
+      }
+    }
   }
+
   _prefs.end();
   if (ok) Serial.println("📥 Loaded settings from NVS.");
+  else    Serial.println("⚠️ No saved settings found in NVS.");
+
   return ok;
 }
+
+
+
+
 
 void TinZrConsole::wipeNVS() {
   _prefs.begin("tinzr_cfg", false);

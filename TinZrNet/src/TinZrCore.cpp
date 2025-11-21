@@ -196,6 +196,11 @@ void TinZrCore::softOn() {
 	// Your app / TinZrNet should re-init WiFi/BLE when isSoftOn() is true.
 
 	_softOn = true;
+	
+    delay(150);
+    ESP.restart();
+	
+	
 }
 
 // ---------------------------------------------------------
