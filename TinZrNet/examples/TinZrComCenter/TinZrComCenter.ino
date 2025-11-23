@@ -1,112 +1,26 @@
 #include <Arduino.h>
-#include <WiFi.h>
+#include "TinZrNode.h"  
 
-#include "TinZrCore.h"
-#include "TinZrConsole.h"
-#include "TinZrConnect.h"
-#include "TinZrHubCommands.h"
+TinZrNode Node;
 
-// -------------- PC Hub settings (must match tab_hub.py) --------------
-static const uint16_t HUB_TCP_PORT   = 4211;
-static const uint16_t HUB_UDP_PORT   = 4210;
-static const IPAddress HUB_MCAST_GRP = IPAddress(239, 1, 1, 1);
-
-// -------------- Globals from TinZrNet library --------------
-// TinZrCore TinZr;   // <-- already defined in TinZrCore.cpp (DO NOT re-declare)
-
-TinZrConsole Console;
-TinZrConnect Net;
-TinZrHubCommands HubCmd(&TinZr, &Net);
-
-// Default Wi-Fi / hostname used by Console on first boot
-TinZrConsoleDefaults DEF = {
-	.ssid       = "Ludvik",
-	.pass       = "Lud12345",
-	.hostname   = "TinZrNode1",
-	.use_static = false
+TinZrNodeConfig cfg = {
+  .console = {
+    .ssid       = "connect123",
+    .pass       = "connect123",
+    .hostname   = "TinZrNode1",  // or nullptr to reuse saved hostname
+    .use_static = false
+  },
+  .hubTcpPort  = 4211,
+  .hubUdpPort  = 4210,
+  .hubMcastGrp = IPAddress(239, 1, 1, 1),
+  .hubIP       = IPAddress(172, 20, 10, 4),  // PC IP
 };
 
-
-// -------------- Arduino setup / loop --------------
-void setup()
-{
-	Serial.begin(115200);
-	delay(200);
-
-	Serial.println();
-	Serial.println("===== TinZr Com Center Node =====");
-
-	// Core hardware services: button, battery, onboard NeoPixel
-	TinZr.begin();
-
-	// Link console to core AND net so it can control LED, battery, soft power, and TCP/UDP
-	Console.attachCore(&TinZr);
-	Console.attachNet(&Net);      
-	Console.begin(DEF);          // brings up Wi-Fi + OTA using defaults or NVS
-
-
-	// Wait until Wi-Fi is connected AND LED is in ready state
-	while (!Console.ready()) {
-		Console.handle();
-		TinZr.handle();
-		delay(20);
-	}
-
-	Serial.println("🌐 Wi-Fi connected.");
-	Serial.print("IP: "); Serial.println(WiFi.localIP());
-
-	// Start TinZrConnect with hub-compatible ports / multicast
-	if (!Net.start(HUB_TCP_PORT, HUB_UDP_PORT, HUB_MCAST_GRP)) {
-   		Serial.println("❌ TinZrConnect.start() failed (Wi-Fi not connected?)");
-	} else {
-			Serial.println("🚀 TinZrConnect started");
-			Net.attachConsole(&Console);
-			Net.setHubIP(IPAddress(172, 20, 10, 4));   // or whatever the PC IP is
-			Net.sendDiscovery();
-			
-			// HubCmd already registered its callback in its constructor
-	}
-
+void setup() {
+  Node.begin(cfg);
 }
 
-
-
-void loop()
-{
-    // Always run core so it can handle the power button / long-press logic
-    TinZr.handle();
-
-    // If we're in soft-off state, do nothing else
-    if (!TinZr.isSoftOn()) {
-        return;
-    }
-
-    // Console: OTA + Wi-Fi state machine
-    Console.handle();
-
-    // Only when Wi-Fi + LED are “ready”
-    if (Console.ready()) {
-        // Pump networking (RX only; no periodic HELLO, no STATUS)
-        Net.handle();
-
-        // --- BUTTON → send LED state to hub on press edge ---
-        static bool lastPressed = false;
-        bool pressed = (digitalRead(PB_PIN) == LOW);   // active-low button
-
-        if (pressed && !lastPressed) {
-            char buf[64];
-            snprintf(buf, sizeof(buf),
-                     "BTN LED %u %u %u %u",
-                     (unsigned)HubCmd.ledR(),
-                     (unsigned)HubCmd.ledG(),
-                     (unsigned)HubCmd.ledB(),
-                     (unsigned)HubCmd.ledBr());
-
-            Serial.print("📤 Button press → sending: ");
-            Serial.println(buf);
-            Net.sendTCP((const uint8_t*)buf, strlen(buf));
-        }
-        lastPressed = pressed;
-    }
+void loop() {
+  Node.handle();
+  
 }
-
