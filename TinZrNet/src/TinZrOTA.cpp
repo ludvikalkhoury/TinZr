@@ -1,5 +1,8 @@
+#include "TinZrConfig.h"
 #include "TinZrOTA.h"
-#include "TinZrCore.h"   
+#include "TinZrCore.h"
+
+#if TINZR_ENABLE_OTA   // ⬅ only compile this file when OTA is enabled
 
 // ==================== Public API ====================
 
@@ -11,41 +14,50 @@ void TinZrOTA::begin(const char* hostname, const TinZrCfg& cfg, uint32_t connect
   Serial.println("\n🚀 TinZrOTA boot");
 
 #ifdef PIN_RGB_LED
-  if (_cfg.led_enable) ledSetState(LedState::SUCCESS_STROBE);
+  if (_cfg.led_enable) {
+    ledSetState(LedState::SUCCESS_STROBE);
+  }
 #endif
-
 
   connectWiFi();   // blocks up to _connectTimeoutMs
   setupOTA();      // safe to call even if not connected yet
 
   if (WiFi.status() == WL_CONNECTED) {
 #ifdef PIN_RGB_LED
-    if (_cfg.led_enable) ledSetState(LedState::SUCCESS_STROBE);
+    if (_cfg.led_enable) {
+      ledSetState(LedState::SUCCESS_STROBE);
+    }
 #endif
     _connState = CONNECTED;
   } else {
     Serial.println("❌ Wi-Fi connect timeout");
 #ifdef PIN_RGB_LED
-    if (_cfg.led_enable) ledSetState(LedState::FAIL_BLINK);
+    if (_cfg.led_enable) {
+      ledSetState(LedState::FAIL_BLINK);
+    }
 #endif
     _connState = FAIL_WAIT;
-    _failUntil = millis() + _failHoldMs;  // keep blinking red for 10 s
+    _failUntil = millis() + _failHoldMs;  // keep blinking red for hold time
   }
 }
 
 void TinZrOTA::handle() {
   ArduinoOTA.handle();
 #ifdef PIN_RGB_LED
-  if (_cfg.led_enable) ledUpdate();
+  if (_cfg.led_enable) {
+    ledUpdate();
+  }
 #endif
 
   switch (_connState) {
     case CONNECTED: {
-      // If Wi-Fi drops after being connected, enter 10 s FAIL_WAIT then retry
+      // If Wi-Fi drops after being connected, enter FAIL_WAIT then retry
       if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("📴 Wi-Fi dropped → red blink 10 s, then retry");
+        Serial.println("📴 Wi-Fi dropped → red blink, then retry");
 #ifdef PIN_RGB_LED
-        if (_cfg.led_enable) ledSetState(LedState::FAIL_BLINK);
+        if (_cfg.led_enable) {
+          ledSetState(LedState::FAIL_BLINK);
+        }
 #endif
         _connState = FAIL_WAIT;
         _failUntil = millis() + _failHoldMs;
@@ -53,26 +65,32 @@ void TinZrOTA::handle() {
     } break;
 
     case FAIL_WAIT: {
-      // Keep blinking red until the hold window ends, then attempt reconnect
+      // Keep blinking red until hold window ends, then attempt reconnect
       if ((int32_t)(millis() - _failUntil) >= 0) {
         Serial.println("🔁 Retry Wi-Fi…");
 #ifdef PIN_RGB_LED
-        if (_cfg.led_enable) ledSetState(LedState::SEARCHING);
+        if (_cfg.led_enable) {
+          ledSetState(LedState::SEARCHING);
+        }
 #endif
         connectWiFi();   // blocks up to _connectTimeoutMs
 
         if (WiFi.status() == WL_CONNECTED) {
 #ifdef PIN_RGB_LED
-          if (_cfg.led_enable) ledSetState(LedState::SUCCESS_STROBE);
+          if (_cfg.led_enable) {
+            ledSetState(LedState::SUCCESS_STROBE);
+          }
 #endif
           setupOTA();    // ensure OTA ready after rejoin
           _connState = CONNECTED;
         } else {
 #ifdef PIN_RGB_LED
-          if (_cfg.led_enable) ledSetState(LedState::FAIL_BLINK);
+          if (_cfg.led_enable) {
+            ledSetState(LedState::FAIL_BLINK);
+          }
 #endif
           _connState = FAIL_WAIT;
-          _failUntil = millis() + _failHoldMs; // another 10 s before next retry
+          _failUntil = millis() + _failHoldMs; // another hold before next retry
         }
       }
     } break;
@@ -87,7 +105,7 @@ void TinZrOTA::handle() {
 // ==================== Wi-Fi & OTA ====================
 
 void TinZrOTA::connectWiFi() {
-  // --- Wi-Fi init: same flow + clear stale state ---
+  // --- Wi-Fi init: clear stale state ---
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.setTxPower(_cfg.tx_power);
@@ -108,11 +126,14 @@ void TinZrOTA::connectWiFi() {
   WiFi.begin(_cfg.ssid, _cfg.pass);
 
   uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED && (millis() - start) < _connectTimeoutMs) {
+  while (WiFi.status() != WL_CONNECTED &&
+         (millis() - start) < _connectTimeoutMs) {
     delay(50);
     ArduinoOTA.handle();         // allow mid-connect OTA pushes
 #ifdef PIN_RGB_LED
-    if (_cfg.led_enable) ledUpdate();
+    if (_cfg.led_enable) {
+      ledUpdate();
+    }
 #endif
   }
 
@@ -131,7 +152,7 @@ void TinZrOTA::setupOTA() {
 
   // Default: NO password (only set if provided & non-empty)
   if (_cfg.ota_password && _cfg.ota_password[0]) {
-    //ArduinoOTA.setPassword(_cfg.ota_password);
+    // ArduinoOTA.setPassword(_cfg.ota_password);
   }
 
   ArduinoOTA.onStart([](){ Serial.println("\nOTA start"); });
@@ -263,3 +284,5 @@ void TinZrOTA::wheel(uint8_t pos, uint8_t& r, uint8_t& g, uint8_t& b) {
 }
 
 #endif  // PIN_RGB_LED
+
+#endif  // TINZR_ENABLE_OTA
