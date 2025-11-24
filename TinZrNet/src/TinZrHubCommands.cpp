@@ -4,15 +4,16 @@
 
 TinZrHubCommands* TinZrHubCommands::_self = nullptr;
 
-TinZrHubCommands::TinZrHubCommands(TinZrCore* core, TinZrConnect* net)
+TinZrHubCommands::TinZrHubCommands(TinZrCore* core, TinZrLink* net)
 : _core(core), _net(net)
 {
   _self = this;
   if (_net) {
-    // Register static callback with TinZrConnect
+    // Register static callback with whichever link we use (Wi-Fi or BLE)
     _net->onMessage(&TinZrHubCommands::netCallback);
   }
 }
+
 
 void TinZrHubCommands::netCallback(IPAddress from, const uint8_t* data, size_t len)
 {
@@ -132,9 +133,11 @@ void TinZrHubCommands::_cmdPing(IPAddress /*from*/)
   Serial.println("↪️  CMD PING → PONG");
 
   if (_net) {
-    _net->sendUDP(String("PONG"));
+    const char* msg = "PONG";
+    _net->sendUDP((const uint8_t*)msg, strlen(msg));
   }
 }
+
 
 void TinZrHubCommands::_cmdBattery()
 {
@@ -143,7 +146,6 @@ void TinZrHubCommands::_cmdBattery()
     return;
   }
 
-  // Assuming TinZrCore has readBatteryVoltage() + batteryPercent()
   float vbat   = _core->readBatteryVoltage();
   int   pct    = _core->batteryPercent();
 
@@ -154,8 +156,11 @@ void TinZrHubCommands::_cmdBattery()
   Serial.println(buf);
 
   // Send battery info back to hub/peers
-  _net->sendTCP(String(buf));
+  size_t len = strlen(buf);
+  _net->sendTCP((const uint8_t*)buf, len);  // ✅ or len, 200 for explicit timeout
+
 }
+
 
 void TinZrHubCommands::_cmdDigital(const String& s)
 {

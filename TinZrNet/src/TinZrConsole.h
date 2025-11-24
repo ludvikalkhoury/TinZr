@@ -3,11 +3,14 @@
 #include <WiFi.h>
 #include <Preferences.h>
 #include <esp_wifi.h>
-#include "TinZrOTA.h"
 
-class TinZrCore; 
-class TinZrConnect;   
+#include "TinZrConfig.h"
+#include "TinZrOTA.h"   // TinZrOTA handles Wi-Fi+OTA when TINZR_ENABLE_OTA=1, stubs when 0
 
+#include "TinZrWiFi.h"  // new include
+
+class TinZrCore;
+class TinZrConnect;
 
 // Optional knobs for default behavior
 #ifndef TINZR_AUTOSAVE_WIFI_ON
@@ -15,67 +18,86 @@ class TinZrConnect;
 #endif
 
 struct TinZrConsoleDefaults {
-  const char* ssid       = "Ludvik";
-  const char* pass       = "Lud12345";
-  const char* hostname   = "esp32c3-ota";
-  bool        use_static = false;
+	const char* ssid       = "Ludvik";
+	const char* pass       = "Lud12345";
+	const char* hostname   = "esp32c3-ota";
+	bool        use_static = false;
 };
-
-
 
 class TinZrConsole {
 public:
-  TinZrConsole() : _autosave_wifi(TINZR_AUTOSAVE_WIFI_ON) {}
+	TinZrConsole() : _autosave_wifi(TINZR_AUTOSAVE_WIFI_ON) {}
 
-  // Initialize console, load saved settings (if any), and bring up OTA
-  void begin(const TinZrConsoleDefaults& def, uint32_t connect_timeout_ms = 15000);
+	// Initialize console, load saved settings (if any), bring up Wi-Fi (and OTA if enabled)
+	void begin(const TinZrConsoleDefaults& def, uint32_t connect_timeout_ms = 15000);
 
-  // Call in loop()
-  void handle();
+	// Call regularly (from loop)
+	void handle();
 
-  // Change policy at runtime
-  void setAutosaveWifi(bool on) { _autosave_wifi = on; }
-    
-  void attachNet(TinZrConnect* net) { _net = net; }
+	// Runtime config
+	void setAutosaveWifi(bool on) { _autosave_wifi = on; }
 
-  const String& getHostname() const { return _host; }
-      
-  // Expose connection helpers
-  bool connected() const { return _ota.connected(); }
-  bool ready() const { return _ota.ready(); }
-  
-  IPAddress ip() const { return _ota.ip(); }
-    
-  
-  void attachCore(TinZrCore* core) { _core = core; }    
-  
-  
+	// Network link
+	void attachNet(TinZrConnect* net) { _net = net; }
 
-    
+	// Console basic info
+	const String& getHostname() const { return _host; }
+
+	// Connection helpers
+	bool connected() const {
+#if TINZR_ENABLE_OTA
+		// When OTA is compiled in, delegate to TinZrOTA (it also owns Wi-Fi in that path)
+		return _ota.connected();
+#else
+		// When OTA is off at compile time, just use raw Wi-Fi status
+		return (WiFi.status() == WL_CONNECTED);
+#endif
+	}
+
+	bool ready() const {
+#if TINZR_ENABLE_OTA
+		// "Ready" = Wi-Fi + OTA + LED state machine OK
+		return _ota.ready();
+#else
+		// Without OTA, ready means Wi-Fi is connected
+		return (WiFi.status() == WL_CONNECTED);
+#endif
+	}
+
+	IPAddress ip() const {
+#if TINZR_ENABLE_OTA
+		return _ota.ip();
+#else
+		return WiFi.localIP();
+#endif
+	}
+
+	// Core attachment (for LED / battery / soft power commands)
+	void attachCore(TinZrCore* core) { _core = core; }
+
 private:
-  // State
-  TinZrOTA     _ota;
-  Preferences  _prefs;
-  TinZrCore*   _core = nullptr; 
-  TinZrConnect* _net = nullptr;    
+	// ---- Members ----
 
-  String  _ssid;
-  String  _pass;
-  String  _host;
-  bool    _use_static = false;
-  bool    _autosave_wifi = false;
+    TinZrWiFi     _wifi;   // <--- new
+    Preferences   _prefs;
+	TinZrCore*    _core = nullptr;
+	TinZrConnect* _net  = nullptr;
 
-  // Core flows
-  void applyConfig(uint32_t connect_timeout_ms = 15000);
-  void saveToNVS();
-  bool loadFromNVS();
-  void wipeNVS();
-  void wipeWiFiDriverNVS();
+	String  _ssid;
+	String  _pass;
+	String  _host;
+	bool    _use_static    = false;
+	bool    _autosave_wifi = false;
 
-  // UI
-  void showConfig();
-  void handleSerial();
+	// ---- Internal flows ----
+	void applyConfig(uint32_t connect_timeout_ms = 15000);
+	void saveToNVS();
+	bool loadFromNVS();
+	void wipeNVS();
+	void wipeWiFiDriverNVS();
 
-  // Pretty banner
-  void printHelp(bool with_header = true);
+	// ---- Serial UI ----
+	void showConfig();
+	void handleSerial();
+	void printHelp(bool with_header = true);
 };

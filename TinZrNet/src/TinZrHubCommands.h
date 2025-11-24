@@ -1,13 +1,15 @@
 #pragma once
 #include <Arduino.h>
 #include <WiFi.h>
+#include "TinZrLink.h"   
 
 class TinZrCore;
-class TinZrConnect;
+class TinZrLink;         
 
 class TinZrHubCommands {
 public:
-  TinZrHubCommands(TinZrCore* core, TinZrConnect* net);
+  // Take any TinZrLink (Wi-Fi, BLE, etc.)
+  TinZrHubCommands(TinZrCore* core, TinZrLink* net);
 
   // Main handler – called by the static callback
   void handleNetMessage(IPAddress from, const uint8_t* data, size_t len);
@@ -18,21 +20,20 @@ public:
   uint8_t ledB()  const { return _curB; }
   uint8_t ledBr() const { return _curBr; }
 
-  // Static trampoline used as TinZrConnect onMessage callback
+  // Static trampoline used as TinZrConnect/TinZrLink onMessage callback
   static void netCallback(IPAddress from, const uint8_t* data, size_t len);
 
 private:
-  TinZrCore*    _core;
-  TinZrConnect* _net;
+  TinZrCore* _core;
+  TinZrLink* _net;        
 
   uint8_t _curR  = 0;
   uint8_t _curG  = 0;
   uint8_t _curB  = 0;
   uint8_t _curBr = 0;
 
-  static TinZrHubCommands* _self;   // <--- singleton instance pointer
+  static TinZrHubCommands* _self;
 
-  // Command handlers...
   void _cmdOff();
   void _cmdLed(const String& s);
   void _cmdPing(IPAddress from);

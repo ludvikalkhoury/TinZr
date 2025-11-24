@@ -1,99 +1,182 @@
 #include "TinZrNode.h"
+#include "TinZrConfig.h"
+#include <string.h>   // for strlen
 
 // TinZrCore singleton is defined in TinZrCore.cpp
 // extern TinZrCore TinZr;   // already provided by TinZrCore.h
 
 TinZrNode::TinZrNode()
-  : _hubCmd(&TinZr, &_net)   // wire HubCommands to Core + Net
+	: _hubCmd(&TinZr, nullptr)   // we'll re-init with the chosen link in begin()
 {
 }
 
 void TinZrNode::begin(const TinZrNodeConfig& cfg) {
-  _cfg = cfg;
+	_cfg = cfg;
 
-  Serial.begin(115200);
-  delay(200);
+	Serial.begin(115200);
+	delay(200);
 
-  Serial.println();
-  Serial.println("===== TinZr Com Center Node (TinZrNode) =====");
+	Serial.println();
+	Serial.println("===== TinZr Com Center Node (TinZrNode) =====");
 
-  // --- Core hardware: button, battery, onboard NeoPixel ---
-  TinZr.begin();
+	// --- Core hardware: button, battery, onboard NeoPixel ---
+	TinZr.begin();
 
-  // --- Wire Console to Core + Net ---
-  _console.attachCore(&TinZr);
-  _console.attachNet(&_net);
+	// Status LED engine (works for Wi-Fi, BLE, etc.)
+	_statusLED.begin(25);   // brightness 0–255
 
-  // Bring up WiFi + OTA using defaults/NVS logic in TinZrConsole::begin
-  _console.begin(_cfg.console);  // :contentReference[oaicite:0]{index=0}
+	// Always attach core to console (LED / battery commands, etc.)
+	_console.attachCore(&TinZr);
 
-  // Wait until Wi-Fi is connected AND LED is in ready state
-  while (!_console.ready()) {
-    _console.handle();
-    TinZr.handle();
-    delay(20);
-  }
+	_link       = nullptr;
+	_netStarted = false;
 
-  Serial.println("🌐 Wi-Fi connected.");
-  Serial.print("IP: ");
-  Serial.println(WiFi.localIP());
+	// =========================
+	// Compile-time mode select
+	// =========================
 
-  // --- Start TinZrConnect with hub-compatible ports / multicast ---
-  if (!_net.start(_cfg.hubTcpPort, _cfg.hubUdpPort, _cfg.hubMcastGrp)) {
-    Serial.println("❌ TinZrConnect.start() failed (Wi-Fi not connected?)");
-    _netStarted = false;
-  } else {
-    Serial.println("🚀 TinZrConnect started");
-    _net.attachConsole(&_console);   // so HELLO uses hostname
-    _net.setHubIP(_cfg.hubIP);
-    _net.sendDiscovery();           // send HELLO <hostname>
-    _netStarted = true;
-    // HubCmd is already registered as message callback in its ctor :contentReference[oaicite:1]{index=1}
-  }
+#if TINZR_ENABLE_WIFI
+	// -------- Wi-Fi path --------
+	Serial.println("🌐 TinZrNode: Wi-Fi mode");
 
-  _lastButtonPressed = false;
+	// Build console defaults from cfg
+	TinZrConsoleDefaults def;
+	def.ssid       = _cfg.ssid;
+	def.pass       = _cfg.pass;
+	def.hostname   = _cfg.hostname;
+	def.use_static = _cfg.use_static;
+
+	_console.attachNet(&_net);
+
+	// LED: searching while Wi-Fi comes up
+	_statusLED.setMode(TinZrStatusLED::Mode::WIFI_SEARCH);
+
+	_console.begin(def);   // internally handles Wi-Fi + (optional) OTA
+
+	// Wait until console reports ready (Wi-Fi up — with or without OTA)
+	while (!_console.ready()) {
+		_console.handle();
+		TinZr.handle();
+		_statusLED.handle();   // keep animation smooth
+		delay(20);
+	}
+
+	Serial.println("🌐 Wi-Fi connected.");
+	Serial.print("IP: ");
+	Serial.println(_console.ip());   // abstracts OTA vs no-OTA internally
+
+	// Start TinZrConnect
+	if (!_net.start(_cfg.hubTcpPort, _cfg.hubUdpPort, _cfg.hubMcastGrp)) {
+		Serial.println("❌ TinZrConnect.start() failed (Wi-Fi not connected?)");
+		_netStarted = false;
+		_link       = nullptr;
+		_statusLED.setMode(TinZrStatusLED::Mode::WIFI_FAIL);
+	} else {
+		Serial.println("🚀 TinZrConnect started");
+		_net.attachConsole(&_console);
+		_net.setHubIP(_cfg.hubIP);
+		_net.sendDiscovery();
+		_netStarted = true;
+		_link       = &_net;
+
+		// Wi-Fi + hub link OK → solid green
+		_statusLED.setMode(TinZrStatusLED::Mode::WIFI_OK);
+	}
+
+#elif TINZR_ENABLE_BLE
+	// -------- BLE path --------
+	Serial.println("🔵 TinZrNode: BLE mode");
+
+	// Name for advertising: prefer cfg.hostname, fallback default
+	const char* name =
+		(_cfg.hostname && _cfg.hostname[0] != '\0')
+			? _cfg.hostname
+			: "TinZrBLE";
+
+	_ble.setName(name);
+
+	// LED: BLE advertising = rainbow
+	_statusLED.setMode(TinZrStatusLED::Mode::BLE_ADVERTISING);
+
+	_netStarted = _ble.start();
+	if (!_netStarted) {
+		Serial.println("❌ TinZrBleConnect.start() failed");
+		_link = nullptr;
+		// re-use WIFI_FAIL mode for "generic failure" = red blink
+		_statusLED.setMode(TinZrStatusLED::Mode::WIFI_FAIL);
+	} else {
+		Serial.print("🔵 TinZrBleConnect started, name = ");
+		Serial.println(name);
+		_link = &_ble;
+
+		// BLE connected → solid green
+		_statusLED.setMode(TinZrStatusLED::Mode::BLE_CONNECTED);
+	}
+#else
+	// -------- No networking --------
+	Serial.println("🚫 TinZrNode: no networking (TINZR_ENABLE_WIFI=0, TINZR_ENABLE_BLE=0)");
+	_netStarted = false;
+	_link       = nullptr;
+	_statusLED.setMode(TinZrStatusLED::Mode::OFF);
+#endif
+
+	// Initialize HubCommands only if we actually have a link
+	if (_link) {
+		new (&_hubCmd) TinZrHubCommands(&TinZr, _link);
+	}
+
+	_lastButtonPressed = false;
 }
 
+
 void TinZrNode::handle() {
-  // Always let Core handle the power button / long-press soft power
-  TinZr.handle();  // :contentReference[oaicite:2]{index=2}
+	// Always let Core handle the power button / long-press soft power
+	TinZr.handle();
 
-  // If we're in soft-off state, do nothing else
-  if (!TinZr.isSoftOn()) {
-    return;
-  }
+	// LED animations
+	_statusLED.handle();
 
-  // Console: OTA + Wi-Fi state machine
-  _console.handle();  // :contentReference[oaicite:3]{index=3}
+	// If we're in soft-off state, do nothing else
+	if (!TinZr.isSoftOn()) {
+		return;
+	}
 
-  // Only when Wi-Fi + LED are “ready”
-  if (_console.ready() && _netStarted) {
-    // Pump networking (RX only; HELLO / control-plane handled inside)
-    _net.handle();
+	// Console state machine (Wi-Fi/OTA) — harmless in BLE/none if stubs
+	_console.handle();
 
-    // Your application-level behavior: button → BTN LED ... to hub
-    _handleButtonToHub();
-  }
+	bool linkReady = _netStarted && (_link != nullptr);
+
+	if (linkReady) {
+		// Pump networking
+		_link->handle();
+
+		// Button → BTN LED ... to hub via selected link
+		_handleButtonToHub();
+	}
 }
 
 void TinZrNode::_handleButtonToHub() {
-  // active-low button
-  bool pressed = (digitalRead(PB_PIN) == LOW);
+	if (!_link) {
+		return;
+	}
 
-  if (pressed && !_lastButtonPressed) {
-    // Falling edge: button just pressed
-    char buf[64];
-    snprintf(buf, sizeof(buf),
-             "BTN LED %u %u %u %u",
-             (unsigned)_hubCmd.ledR(),
-             (unsigned)_hubCmd.ledG(),
-             (unsigned)_hubCmd.ledB(),
-             (unsigned)_hubCmd.ledBr());
+	// active-low button
+	bool pressed = (digitalRead(PB_PIN) == LOW);
 
-    Serial.print("📤 Button press → sending: ");
-    Serial.println(buf);
-    _net.sendTCP((const uint8_t*)buf, strlen(buf));
-  }
+	if (pressed && !_lastButtonPressed) {
+		// Falling edge: button just pressed
+		char buf[64];
+		snprintf(buf, sizeof(buf),
+		         "BTN LED %u %u %u %u",
+		         (unsigned)_hubCmd.ledR(),
+		         (unsigned)_hubCmd.ledG(),
+		         (unsigned)_hubCmd.ledB(),
+		         (unsigned)_hubCmd.ledBr());
 
-  _lastButtonPressed = pressed;
+		Serial.print("📤 Button press → sending: ");
+		Serial.println(buf);
+		_link->sendTCP((const uint8_t*)buf, strlen(buf));
+	}
+
+	_lastButtonPressed = pressed;
 }

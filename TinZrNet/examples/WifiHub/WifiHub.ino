@@ -4,12 +4,10 @@
 TinZrNode Node;
 
 TinZrNodeConfig cfg = {
-  .console = {
-    .ssid       = "connect123",
-    .pass       = "connect123",
-    .hostname   = "TinZrNode1",  // or nullptr to reuse saved hostname
-    .use_static = false
-  },
+  .ssid       = "Ludvik",
+  .pass       = "Lud12345",
+  .hostname   = "TinZrNode1",  // or nullptr to reuse saved hostname
+  .use_static = false,
   .hubTcpPort  = 4211,
   .hubUdpPort  = 4210,
   .hubMcastGrp = IPAddress(239, 1, 1, 1),

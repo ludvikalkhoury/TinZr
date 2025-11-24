@@ -11,7 +11,7 @@ DEFAULT_TCP_PORT   = 4211
 DEFAULT_MCAST_GRP  = "239.1.1.1"
 
 
-class HubTab(ttk.Frame):
+class WifiHubTab(ttk.Frame):
     def __init__(self, parent, app):
         super().__init__(parent)
         self.app = app
