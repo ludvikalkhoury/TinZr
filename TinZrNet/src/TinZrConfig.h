@@ -8,11 +8,11 @@
 //
 
 #ifndef TINZR_ENABLE_WIFI
-#define TINZR_ENABLE_WIFI 1   // 1 = include Wi-Fi + TinZrConnect; 0 = no Wi-Fi code
+#define TINZR_ENABLE_WIFI 0   // 1 = include Wi-Fi + TinZrConnect; 0 = no Wi-Fi code
 #endif
 
 #ifndef TINZR_ENABLE_BLE
-#define TINZR_ENABLE_BLE 0   // 1 = include BLE + TinZrBleConnect; 0 = no BLE code
+#define TINZR_ENABLE_BLE 1   // 1 = include BLE + TinZrBleConnect; 0 = no BLE code
 #endif
 
 #ifndef TINZR_ENABLE_OTA
