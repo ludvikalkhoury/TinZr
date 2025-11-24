@@ -1,77 +1,53 @@
 #pragma once
+#include <Arduino.h>
+#include <WiFi.h>
 
 #include "TinZrConfig.h"
-
-#include <Arduino.h>
 #include "TinZrCore.h"
+#include "TinZrLED.h"
+#include "TinZrConnections.h"
 #include "TinZrConsole.h"
-#include "TinZrHubCommands.h"
-#include "TinZrLink.h"
-#include "TinZrStatusLED.h"   
 
-#if TINZR_ENABLE_WIFI
-  #include <WiFi.h>
-  #include "TinZrConnect.h"
-#endif
-
-#if TINZR_ENABLE_BLE
-  #include "TinZrBleConnect.h"
-#endif
-
-// High-level config for the node.
-// All user-facing settings live here (no TinZrConsoleDefaults inside).
 struct TinZrNodeConfig {
-	// --- Wi-Fi / identity (used only if TINZR_ENABLE_WIFI == 1) ---
-	const char* ssid       = "";
-	const char* pass       = "";
-	const char* hostname   = "TinZrNode";
+	const char* ssid       = "connect123";
+	const char* pass       = "connect123";
+	const char* hostname   = "TinZrNode1";
 	bool        use_static = false;
 
-	// --- Hub discovery / ports (Wi-Fi path only) ---
-	uint16_t  hubTcpPort   = 4211;
-	uint16_t  hubUdpPort   = 4210;
-	IPAddress hubMcastGrp  = IPAddress(239, 1, 1, 1);
-
-#if TINZR_ENABLE_WIFI
-	IPAddress hubIP        = IPAddress(172, 20, 10, 4);
-#endif
+	uint16_t    hubTcpPort  = 4211;
+	uint16_t    hubUdpPort  = 4210;
+	IPAddress   hubMcastGrp = IPAddress(239, 1, 1, 1);
+	IPAddress   hubIP       = IPAddress(0, 0, 0, 0);
 };
 
 class TinZrNode {
 public:
 	TinZrNode();
-
-	// Call from Arduino setup()
 	void begin(const TinZrNodeConfig& cfg);
-
-	// Call from Arduino loop()
 	void handle();
 
-	TinZrConsole&     console() { return _console; }
-#if TINZR_ENABLE_WIFI
-	TinZrConnect&     net()     { return _net; }
-#endif
-	TinZrHubCommands& hubCmd()  { return _hubCmd; }
-
 private:
-	TinZrNodeConfig _cfg{};
-	bool _netStarted = false;
-
-	TinZrConsole    _console;
-
-#if TINZR_ENABLE_WIFI
-	TinZrConnect    _net;   // Wi-Fi link
-#endif
+	TinZrNodeConfig   _cfg{};
+	TinZrConsole      _console;
+	TinZrConnect      _net;
 
 #if TINZR_ENABLE_BLE
-	TinZrBleConnect _ble;   // BLE link
+	TinZrBleConnect   _ble;
 #endif
 
-	TinZrLink*      _link = nullptr;   // active link (Wi-Fi, BLE, or null)
+	TinZrStatusLED    _statusLED;
+	TinZrHubCommands  _hubCmd;
+	TinZrLink*        _link       = nullptr;
 
-	TinZrHubCommands _hubCmd;
-    TinZrStatusLED   _statusLED;  
-	
-	bool _lastButtonPressed = false;
+	bool              _netStarted = false;
+
+	// 🔹 NEW: track last-known connection state
+	bool              _wifiWasUp = false;
+#if TINZR_ENABLE_BLE
+	bool              _bleWasConnected = false;
+#endif
+
+	bool              _lastButtonPressed = false;
+
 	void _handleButtonToHub();
 };
