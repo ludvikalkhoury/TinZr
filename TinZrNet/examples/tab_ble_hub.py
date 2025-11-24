@@ -122,6 +122,14 @@ class BleHubTab(ttk.Frame):
         if self.running:
             return
 
+        # 🔄 Full reset of state, like rerunning the script
+        with self.peers_lock:
+            self.peers.clear()
+        self._update_peers_list()
+
+        self.log_queue = queue.Queue()
+        self.event_queue = queue.Queue()
+
         self.running = True
         self.start_button.config(state="disabled")
         self.stop_button.config(state="normal")
@@ -131,6 +139,7 @@ class BleHubTab(ttk.Frame):
         self.ble_thread = threading.Thread(target=self._ble_thread_main, daemon=True)
         self.ble_thread.start()
 
+
     def on_stop_hub(self):
         if not self.running:
             return
@@ -138,12 +147,13 @@ class BleHubTab(ttk.Frame):
         self._log("[BLE HUB] Stopping BLE hub...")
         self.running = False
 
-        # Ask the event loop to close all clients and then stop
+        # Graceful shutdown of all BLE clients on the event loop
         if self.loop is not None:
             async def _shutdown():
                 self._log("[BLE HUB] Shutting down BLE clients...")
                 with self.peers_lock:
                     peers_copy = dict(self.peers)
+
                 for addr, info in peers_copy.items():
                     client = info.get("client")
                     if client is not None and client.is_connected:
@@ -152,15 +162,38 @@ class BleHubTab(ttk.Frame):
                             self._log(f"[BLE HUB] Disconnected {addr}")
                         except Exception as e:
                             self._log(f"[BLE HUB] Error disconnecting {addr}: {e}")
-                # allow loop to stop
+
+                # Mark everything as disconnected / client=None
+                with self.peers_lock:
+                    for addr in list(self.peers.keys()):
+                        self.peers[addr]["connected"] = False
+                        self.peers[addr]["client"] = None
+
             try:
                 asyncio.run_coroutine_threadsafe(_shutdown(), self.loop)
             except RuntimeError:
-                pass  # loop already closing/closed
+                # loop might already be closing/closed
+                pass
+
+        # Optionally wait briefly for the BLE thread to exit
+        if self.ble_thread and self.ble_thread.is_alive():
+            try:
+                self.ble_thread.join(timeout=2.0)
+            except RuntimeError:
+                pass
+
+        # Hard reset of BLE state
+        self.loop = None
+        self.ble_thread = None
+        with self.peers_lock:
+            self.peers.clear()
+        self._update_peers_list()
 
         self.start_button.config(state="normal")
         self.stop_button.config(state="disabled")
         self._set_status("BLE Hub stopped", "gray")
+        self._log("[BLE HUB] Hub fully stopped and state reset.")
+
 
     def _ble_thread_main(self):
         """
@@ -174,9 +207,10 @@ class BleHubTab(ttk.Frame):
             self._log(f"[BLE HUB] Exception in BLE loop: {e}")
         finally:
             try:
-                self.loop.stop()
+                self.loop.close()
             except Exception:
                 pass
+
 
     async def _ble_main_loop(self):
         """
