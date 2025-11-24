@@ -79,6 +79,7 @@ private:
 	// ---- Members ----
 
     TinZrWiFi     _wifi;   // <--- new
+	TinZrOTA	  _ota;
     Preferences   _prefs;
 	TinZrCore*    _core = nullptr;
 	TinZrConnect* _net  = nullptr;
