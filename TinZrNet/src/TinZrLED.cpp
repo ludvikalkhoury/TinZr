@@ -118,3 +118,43 @@ void TinZrStatusLED::_wheel(uint8_t pos, uint8_t& r, uint8_t& g, uint8_t& b) {
     }
 }
 #endif
+
+
+
+// ================= NEW: blocking flash helper =================
+void TinZrStatusLED::flashColor(
+    uint8_t  r,
+    uint8_t  g,
+    uint8_t  b,
+    uint8_t  brightness,
+    uint8_t  times,
+    uint16_t on_ms,
+    uint16_t off_ms
+) {
+#ifdef PIN_RGB_LED
+    // Save current state
+    Mode    oldMode       = _mode;
+    uint8_t oldBrightness = _brightness;
+
+    // We temporarily take full control of the LED; mode/handle()
+    // blinking is effectively paused during this call.
+    for (uint8_t i = 0; i < times; ++i) {
+        _brightness = brightness;
+        _setRGB(r, g, b);
+        TinZr.handle();   // optional: keep core servicing
+        delay(on_ms);
+
+        _setRGB(0, 0, 0);
+        TinZr.handle();
+        delay(off_ms);
+    }
+
+    // Restore previous brightness & mode (which also restores the correct color)
+    _brightness = oldBrightness;
+    setMode(oldMode);
+#else
+    (void)r; (void)g; (void)b;
+    (void)brightness; (void)times;
+    (void)on_ms; (void)off_ms;
+#endif
+}
