@@ -1,7 +1,6 @@
 #pragma once
 
 #include <Arduino.h>
-#include <SD.h>
 
 #include "TinZrConfig.h"
 #include "TinZrCore.h"
@@ -13,7 +12,7 @@ struct TinZrWearableConfig {
 	uint16_t    sample_interval_ms = 4;  // default ~250 Hz target
 };
 
-// Operational modes (we still keep these, but SD is ignored now)
+// We keep enum for future flexibility, but effectively use BLE_ONLY.
 enum class TinZrWearMode : uint8_t {
 	BLE_ONLY = 0,
 	SD_ONLY,
@@ -29,8 +28,8 @@ public:
 
 private:
 	TinZrWearableConfig _cfg{};
-
-	// LED (same style as TinZrNode)
+	
+	// Status LED (same style as TinZrNode)
 	TinZrStatusLED    _statusLED;
 
 #if TINZR_ENABLE_BLE
@@ -42,35 +41,14 @@ private:
 	// State
 	TinZrWearMode     _mode           = TinZrWearMode::BLE_ONLY;
 	bool              _sensorsReady   = false;
-	bool              _sdReady        = false;   // SD is disabled, but kept for compatibility
 	bool              _streaming      = false;
 	unsigned long     _lastSampleMs   = 0;
-
-	// SD logging (NO-OP in this build; kept for linker compatibility)
-	File              _logFile;
-	unsigned long     _lastFlushMs    = 0;
-
-	// Button multi-click
-	bool              _btnRaw             = true;
-	bool              _btnStable          = true;
-	bool              _btnLastStable      = true;
-	unsigned long     _btnLastChange      = 0;
-	uint8_t           _btnClickCount      = 0;
-	unsigned long     _lastShortClickTime = 0;
+	bool              _wasSoftOn      = false;    
 
 	// Internal handlers
 	void _handleBLE();
-	void _handleButton();
 	void _handleStreaming();
-
-	// Mode / SD
-	void _cycleMode();                       // six-click
-	void _applyStreamingChange(bool enable); // triple-click
-	void _startSDLogging();
-	void _stopSDLogging();
-	bool _openNewLogFile();
-	void _writeHeader();
-	void _flashModeLED(TinZrWearMode wearMode);
+	void _applyStreamingChange(bool enable);
 
 	// LED
 	void _updateLED();

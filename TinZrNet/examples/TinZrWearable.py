@@ -1,5 +1,6 @@
 import os
 import math
+from datetime import datetime
 from PyQt5 import QtGui
 
 os.environ["BLEAK_BACKEND"] = "dotnet"  # important on Windows
@@ -43,10 +44,92 @@ ACC_SCALE = 1e-3   # milli-units -> m/s^2
 GYR_SCALE = 1e-3   # milli-units -> rad/s (or dps-ish)
 
 # ================== Viewer Config ==================
-FS_RESAMP_HZ    = 240.0   # desired *fixed* rate
+FS_RESAMP_HZ    = 240.0   # desired *fixed* output Fs (plot + save)
 WINDOW_SEC      = 3.0     # seconds visible on screen
 UPDATE_MS       = 10      # GUI update period in ms
-MAX_RAW_SAMPLES = 20000   # safety cap on raw buffer size
+MAX_RAW_SAMPLES = 20000   # safety cap on *plotting* raw buffer size
+
+
+# ================== Toggle Switch Widget ==================
+class ToggleSwitch(QtWidgets.QCheckBox):
+    """
+    Nice big oval sliding switch:
+      - OFF: gray background
+      - ON : green background
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # Bigger, chunkier pill
+        self._thumb_radius = 16
+        self._track_radius = 20
+        self._margin = 4
+
+        self._width = 90
+        self._height = 44
+
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.setCheckable(True)
+        self.setChecked(False)
+        self.setFixedSize(self._width, self._height)
+
+        # Hide default checkbox indicator
+        self.setStyleSheet("QCheckBox::indicator { width:0px; height:0px; }")
+
+        # repaint whenever state changes
+        self.stateChanged.connect(lambda _: self.update())
+
+    def sizeHint(self):
+        return QtCore.QSize(self._width, self._height)
+
+    def hitButton(self, pos: QtCore.QPoint) -> bool:
+        """
+        Make the *entire* rect clickable, not just the (hidden) indicator.
+        """
+        return self.rect().contains(pos)
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+
+        rect = self.rect()
+        x = rect.x()
+        y = rect.y()
+        w = rect.width()
+        h = rect.height()
+
+        # Track rect
+        track_rect = QtCore.QRectF(
+            x + self._margin,
+            y + self._margin,
+            w - 2 * self._margin,
+            h - 2 * self._margin
+        )
+
+        # Background color
+        if self.isChecked():
+            track_color = QtGui.QColor(76, 175, 80)   # ON: green
+        else:
+            track_color = QtGui.QColor(110, 110, 120) # OFF: gray
+
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(track_color)
+        p.drawRoundedRect(track_rect, self._track_radius, self._track_radius)
+
+        # Thumb
+        thumb_d = 2 * self._thumb_radius
+        if self.isChecked():
+            thumb_x = track_rect.right() - thumb_d
+        else:
+            thumb_x = track_rect.left()
+
+        thumb_y = track_rect.center().y() - self._thumb_radius
+        thumb_rect = QtCore.QRectF(thumb_x, thumb_y, thumb_d, thumb_d)
+
+        thumb_color = QtGui.QColor(240, 240, 240)
+        p.setBrush(thumb_color)
+        p.drawEllipse(thumb_rect)
+
+        p.end()
 
 
 # ================== Spinner Widget ==================
@@ -117,12 +200,41 @@ class WearableViewer(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("TinZrWearable – resampled to fixed Fs")
+        self.setWindowTitle("TinZr Wearable")
+        # Window icon (TinZr_logo.ico in same folder)
+        self.setWindowIcon(QtGui.QIcon("TinZr_small_logo.ico"))
+
+        # ---------- Fixed size window ----------
+        self.setFixedSize(1200, 1400)
+        self.setWindowFlag(QtCore.Qt.MSWindowsFixedSizeDialogHint, True)
+
+        # ---------- Global style / theme ----------
+        self._apply_theme()
+
         main_layout = QtWidgets.QVBoxLayout(self)
+        main_layout.setContentsMargins(16, 12, 16, 12)
+        main_layout.setSpacing(8)
+
+        # ================== HEADER ==================
+        header = QtWidgets.QWidget()
+        header_layout = QtWidgets.QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 4)
+        header_layout.setSpacing(10)
+
+        title_label = QtWidgets.QLabel("TinZr Wearable Viewer")
+        title_label.setStyleSheet("font-size: 16pt; font-weight: 600; color: #E3F2FD;")
+
+        header_layout.addWidget(title_label, 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        header_layout.addStretch(1)
+
+        main_layout.addWidget(header)
 
         # ================== CONTROL PANEL ==================
         ctrl_widget = QtWidgets.QWidget()
         ctrl_layout = QtWidgets.QGridLayout(ctrl_widget)
+        ctrl_layout.setContentsMargins(0, 0, 0, 0)
+        ctrl_layout.setHorizontalSpacing(16)
+        ctrl_layout.setVerticalSpacing(8)
 
         row = 0
 
@@ -131,65 +243,64 @@ class WearableViewer(QtWidgets.QWidget):
         self.btn_scan.clicked.connect(self.on_scan_clicked)
         ctrl_layout.addWidget(self.btn_scan, row, 0)
 
-        # Spinner next to the button
-        self.spinner = Spinner(radius=8, line_width=2)
-        ctrl_layout.addWidget(
-            self.spinner,
-            row,
-            0,
-            alignment=QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter,
-        )
+        # Spinner OVERLAYED in the middle of the button
+        self.spinner = Spinner(radius=8, line_width=2, parent=self.btn_scan)
+        self.spinner.raise_()
+        self.btn_scan.installEventFilter(self)
+        self._center_spinner_on_button()
 
         # Device combo box
         self.combo_devices = QtWidgets.QComboBox()
-        ctrl_layout.addWidget(self.combo_devices, row, 1, 1, 3)
+        ctrl_layout.addWidget(self.combo_devices, row, 1, 1, 4)
 
         row += 1
 
-        # Connect / Disconnect
-        self.btn_connect = QtWidgets.QPushButton("Connect")
-        self.btn_connect.clicked.connect(self.on_connect_clicked)
-        ctrl_layout.addWidget(self.btn_connect, row, 0)
+        # Nice labels + toggle switches
+        lbl_connect = QtWidgets.QLabel("Connect")
+        lbl_stream  = QtWidgets.QLabel("Stream Data")
+        lbl_record  = QtWidgets.QLabel("Record")
 
-        self.btn_disconnect = QtWidgets.QPushButton("Disconnect")
-        self.btn_disconnect.clicked.connect(self.on_disconnect_clicked)
-        self.btn_disconnect.setEnabled(False)
-        ctrl_layout.addWidget(self.btn_disconnect, row, 1)
+        self.toggle_connect = ToggleSwitch()
+        self.toggle_stream  = ToggleSwitch()
+        self.toggle_record  = ToggleSwitch()
 
-        # Start / Stop data streaming (from our point of view)
-        self.btn_start = QtWidgets.QPushButton("Start Data")
-        self.btn_start.clicked.connect(self.on_start_data_clicked)
-        self.btn_start.setEnabled(False)
-        ctrl_layout.addWidget(self.btn_start, row, 2)
+        # initial states
+        self.toggle_connect.setChecked(False)
+        self.toggle_stream.setChecked(False)
+        self.toggle_record.setChecked(False)
 
-        self.btn_stop = QtWidgets.QPushButton("Stop Data")
-        self.btn_stop.clicked.connect(self.on_stop_data_clicked)
-        self.btn_stop.setEnabled(False)
-        ctrl_layout.addWidget(self.btn_stop, row, 3)
+        # connect toggles to handlers
+        self.toggle_connect.toggled.connect(self.on_connect_toggled)
+        self.toggle_stream.toggled.connect(self.on_stream_toggled)
+        self.toggle_record.toggled.connect(self.on_record_toggled)
+
+        ctrl_layout.addWidget(lbl_connect, row, 0, alignment=QtCore.Qt.AlignRight)
+        ctrl_layout.addWidget(self.toggle_connect, row, 1, alignment=QtCore.Qt.AlignLeft)
+
+        ctrl_layout.addWidget(lbl_stream, row, 2, alignment=QtCore.Qt.AlignRight)
+        ctrl_layout.addWidget(self.toggle_stream, row, 3, alignment=QtCore.Qt.AlignLeft)
+
+        ctrl_layout.addWidget(lbl_record, row, 4, alignment=QtCore.Qt.AlignRight)
+        ctrl_layout.addWidget(self.toggle_record, row, 5, alignment=QtCore.Qt.AlignLeft)
 
         row += 1
-
-        # Recording buttons
-        self.btn_rec_start = QtWidgets.QPushButton("Start Recording")
-        self.btn_rec_start.clicked.connect(self.on_start_recording_clicked)
-        self.btn_rec_start.setEnabled(False)
-        ctrl_layout.addWidget(self.btn_rec_start, row, 0)
-
-        self.btn_rec_stop = QtWidgets.QPushButton("Stop Recording")
-        self.btn_rec_stop.clicked.connect(self.on_stop_recording_clicked)
-        self.btn_rec_stop.setEnabled(False)
-        ctrl_layout.addWidget(self.btn_rec_stop, row, 1)
 
         # Status label
         self.label_status = QtWidgets.QLabel("Status: Idle")
-        ctrl_layout.addWidget(self.label_status, row, 2, 1, 2)
+        self.label_status.setObjectName("statusLabel")
+        ctrl_layout.addWidget(self.label_status, row, 0, 1, 6)
 
         main_layout.addWidget(ctrl_widget)
+
+        # Disable stream & record toggles until connected
+        self.toggle_connect.setEnabled(True)
+        self.toggle_stream.setEnabled(False)
+        self.toggle_record.setEnabled(False)
 
         # ================== Graphics Layout ==================
         self.graphics = pg.GraphicsLayoutWidget()
         main_layout.addWidget(self.graphics)
-        self.graphics.setBackground('k')
+        self.graphics.setBackground("#020817")  # deep navy
 
         # Only signals we actually use
         self.signal_order = [
@@ -242,7 +353,7 @@ class WearableViewer(QtWidgets.QWidget):
             self.axes[key] = p
             self.curves[key] = curve
 
-        # ================== Buffers ==================
+        # ================== Buffers (plotting) ==================
         self.sample_count = 0            # raw sample index from firmware (1,2,3,...)
         self.idx_raw = []                # indices
         self.data_raw = {k: [] for k in self.signal_order}
@@ -264,6 +375,12 @@ class WearableViewer(QtWidgets.QWidget):
         self.streaming = False
         self.recording = False
         self.record_file = None
+        self.record_path = None
+
+        # ===== Recording buffers (for 240 Hz resampling on stop) =====
+        self.rec_idx_raw = []
+        self.rec_data_raw = {k: [] for k in self.signal_order}
+        self.record_fs = FS_RESAMP_HZ  # forced output Fs (240 Hz)
 
         # BLE stuff
         self.loop = asyncio.new_event_loop()
@@ -282,6 +399,86 @@ class WearableViewer(QtWidgets.QWidget):
         self.timer.timeout.connect(self.update_plot)
         self.timer.start(UPDATE_MS)
 
+    # ---------- Theme helper ----------
+    def _apply_theme(self):
+        # Dark blue TinZr-ish vibe
+        palette = self.palette()
+        bg = QtGui.QColor("#020817")       # main window background
+        base = QtGui.QColor("#071529")     # controls background
+        text = QtGui.QColor("#E0E8FF")     # light text
+        accent = QtGui.QColor("#1E88E5")   # bright blue
+        disable = QtGui.QColor("#555a70")
+
+        palette.setColor(QtGui.QPalette.Window, bg)
+        palette.setColor(QtGui.QPalette.Base, base)
+        palette.setColor(QtGui.QPalette.AlternateBase, base.darker(120))
+        palette.setColor(QtGui.QPalette.Text, text)
+        palette.setColor(QtGui.QPalette.WindowText, text)
+        palette.setColor(QtGui.QPalette.Button, base)
+        palette.setColor(QtGui.QPalette.ButtonText, text)
+        palette.setColor(QtGui.QPalette.Highlight, accent)
+        palette.setColor(QtGui.QPalette.HighlightedText, QtCore.Qt.white)
+        palette.setColor(QtGui.QPalette.Disabled, QtGui.QPalette.ButtonText, disable)
+        palette.setColor(QtGui.QPalette.Disabled, QtGui.QPalette.Text, disable)
+        self.setPalette(palette)
+
+        # Style sheet for controls
+        self.setStyleSheet("""
+        QWidget {
+            background-color: #020817;
+            color: #E0E8FF;
+            font-family: "Segoe UI", "Roboto", sans-serif;
+            font-size: 11pt;
+        }
+        QComboBox {
+            background-color: #071529;
+            border: 1px solid #1E88E5;
+            border-radius: 8px;
+            padding: 4px 8px;
+        }
+        QComboBox QAbstractItemView {
+            background-color: #071529;
+            selection-background-color: #1E88E5;
+            selection-color: #ffffff;
+        }
+        QPushButton {
+            background-color: #1565C0;
+            border-radius: 16px;
+            padding: 6px 18px;
+            color: white;
+            font-weight: 500;
+        }
+        QPushButton:hover {
+            background-color: #1E88E5;
+        }
+        QPushButton:pressed {
+            background-color: #0D47A1;
+        }
+        QPushButton:disabled {
+            background-color: #0b2340;
+            color: #70758c;
+        }
+        QLabel#statusLabel {
+            color: #90CAF9;
+            font-size: 10pt;
+        }
+        """)
+
+    # ---------- Spinner centering on button ----------
+    def _center_spinner_on_button(self):
+        if not self.spinner or not self.btn_scan:
+            return
+        brect = self.btn_scan.rect()
+        srect = self.spinner.rect()
+        x = (brect.width() - srect.width()) // 2
+        y = (brect.height() - srect.height()) // 2
+        self.spinner.move(x, y)
+
+    def eventFilter(self, obj, event):
+        if obj is self.btn_scan and event.type() == QtCore.QEvent.Resize:
+            self._center_spinner_on_button()
+        return super().eventFilter(obj, event)
+
     # ============ BLE loop thread ============
     def run_ble_loop(self):
         asyncio.set_event_loop(self.loop)
@@ -290,6 +487,11 @@ class WearableViewer(QtWidgets.QWidget):
     # ============ UI helpers ============
     def set_status(self, text):
         self.label_status.setText(f"Status: {text}")
+
+    def _block_and_set(self, toggle: ToggleSwitch, checked: bool):
+        toggle.blockSignals(True)
+        toggle.setChecked(checked)
+        toggle.blockSignals(False)
 
     # ============ Scan logic ============
     def on_scan_clicked(self):
@@ -303,6 +505,7 @@ class WearableViewer(QtWidgets.QWidget):
         self.devices = []
         self.btn_scan.setEnabled(False)
         self.spinner.start()
+        self._center_spinner_on_button()
 
         async def _scan():
             devs = await BleakScanner.discover(timeout=4.0)
@@ -346,25 +549,41 @@ class WearableViewer(QtWidgets.QWidget):
 
         self.set_status(f"Found {len(devs)} device(s)")
 
-    # ============ Connect / Disconnect ============
-    def on_connect_clicked(self):
+    # ============ Connect / Disconnect via toggle ============
+    def on_connect_toggled(self, checked: bool):
+        if checked:
+            # Show status immediately (before async work)
+            self.set_status("Connecting...")
+            QtWidgets.QApplication.processEvents()  # forces UI update
+
+            ok = self._connect()
+
+            if ok:
+                self.set_status("Connected")
+            else:
+                self.set_status("Connect failed")
+                self._block_and_set(self.toggle_connect, False)
+        else:
+            self._disconnect()
+
+    def _connect(self) -> bool:
         """Connect to the selected device and subscribe to notifications."""
         if not self.loop.is_running():
             self.set_status("BLE loop not running")
-            return
+            return False
 
         if self.client and self.client.is_connected:
             self.set_status("Already connected")
-            return
+            return True
 
         addr = self.combo_devices.currentData()
         if not addr:
             self.set_status("No device selected")
-            return
+            return False
 
         self.set_status(f"Connecting to {addr}...")
 
-        async def _connect():
+        async def _connect_coro():
             client = BleakClient(addr)
             await client.connect()
             if not client.is_connected:
@@ -373,74 +592,95 @@ class WearableViewer(QtWidgets.QWidget):
             await client.start_notify(TINZR_BLE_TX_CHAR_UUID, self.on_rx)
             return client
 
-        fut = asyncio.run_coroutine_threadsafe(_connect(), self.loop)
+        fut = asyncio.run_coroutine_threadsafe(_connect_coro(), self.loop)
         try:
             client = fut.result()
         except Exception as e:
             self.set_status(f"Connect error: {e}")
-            return
+            return False
 
         self.client = client
         self.set_status("Connected")
-        self.btn_disconnect.setEnabled(True)
-        self.btn_start.setEnabled(True)
         self.btn_scan.setEnabled(False)
+        self.combo_devices.setEnabled(False)
 
-    def on_disconnect_clicked(self):
+        # Now you can stream
+        self.toggle_stream.setEnabled(True)
+        self.toggle_record.setEnabled(False)
+        return True
+
+    def _disconnect(self):
+        """Disconnect and reset toggles."""
         if not self.loop.is_running():
             self.set_status("BLE loop not running")
-            return
+        else:
+            if self.client and self.client.is_connected:
+                self.set_status("Disconnecting...")
 
-        if not self.client or not self.client.is_connected:
-            self.set_status("No active connection")
-            return
+                async def _disc():
+                    try:
+                        await self.client.stop_notify(TINZR_BLE_TX_CHAR_UUID)
+                    except Exception:
+                        pass
+                    await self.client.disconnect()
 
-        self.set_status("Disconnecting...")
-
-        async def _disc():
-            try:
-                await self.client.stop_notify(TINZR_BLE_TX_CHAR_UUID)
-            except Exception:
-                pass
-            await self.client.disconnect()
-
-        fut = asyncio.run_coroutine_threadsafe(_disc(), self.loop)
-        try:
-            fut.result()
-        except Exception as e:
-            self.set_status(f"Disconnect error: {e}")
-            return
+                fut = asyncio.run_coroutine_threadsafe(_disc(), self.loop)
+                try:
+                    fut.result()
+                except Exception as e:
+                    self.set_status(f"Disconnect error: {e}")
 
         self.client = None
+
+        # stop streaming / recording if needed
+        if self.streaming:
+            self.on_stop_data_clicked()
+        if self.recording:
+            self.on_stop_recording_clicked()
+
+        # reset toggles / UI
         self.streaming = False
-        self.btn_disconnect.setEnabled(False)
-        self.btn_start.setEnabled(False)
-        self.btn_stop.setEnabled(False)
-        self.btn_rec_start.setEnabled(False)
-        self.btn_rec_stop.setEnabled(False)
+        self._block_and_set(self.toggle_stream, False)
+        self.toggle_stream.setEnabled(False)
+
+        self._block_and_set(self.toggle_record, False)
+        self.toggle_record.setEnabled(False)
+
         self.btn_scan.setEnabled(True)
+        self.combo_devices.setEnabled(True)
         self.set_status("Disconnected")
 
-    # ============ Start / Stop Data ============
+    # ============ Stream Data via toggle ============
+    def on_stream_toggled(self, checked: bool):
+        if checked:
+            self.on_start_data_clicked()
+            if not self.streaming:
+                # if start failed, revert toggle
+                self._block_and_set(self.toggle_stream, False)
+        else:
+            self.on_stop_data_clicked()
+
     def on_start_data_clicked(self):
         """Clear buffers and start using incoming data."""
         if not self.client or not self.client.is_connected:
             self.set_status("Not connected")
+            self.streaming = False
             return
 
-        # If your firmware needs an explicit start command, uncomment:
-        # if CMD_START:
-        #     fut = asyncio.run_coroutine_threadsafe(
-        #         self.client.write_gatt_char(TINZR_BLE_RX_CHAR_UUID, CMD_START),
-        #         self.loop
-        #     )
-        #     try:
-        #         fut.result()
-        #     except Exception as e:
-        #         self.set_status(f"Start cmd error: {e}")
-        #         return
+        # 👉 SEND START COMMAND TO WEARABLE
+        if CMD_START:
+            fut = asyncio.run_coroutine_threadsafe(
+                self.client.write_gatt_char(TINZR_BLE_RX_CHAR_UUID, CMD_START),
+                self.loop
+            )
+            try:
+                fut.result()
+            except Exception as e:
+                self.set_status(f"Start cmd error: {e}")
+                self.streaming = False
+                return
 
-        # reset buffers & Fs calibration
+        # reset buffers & Fs calibration (for plotting)
         self.sample_count = 0
         self.idx_raw.clear()
         for k in self.data_raw:
@@ -451,39 +691,54 @@ class WearableViewer(QtWidgets.QWidget):
         self.calib_start_count = None
 
         self.streaming = True
-        self.btn_start.setEnabled(False)
-        self.btn_stop.setEnabled(True)
-        self.btn_rec_start.setEnabled(True)
-        self.set_status("Streaming (waiting for Fs calibration)")
+        # now recording is allowed
+        self.toggle_record.setEnabled(True)
+        self.set_status("Starting streaming...")
+
+        # also reset recording buffers if we start a new stream
+        self.rec_idx_raw.clear()
+        for k in self.rec_data_raw:
+            self.rec_data_raw[k].clear()
 
     def on_stop_data_clicked(self):
         if not self.streaming:
             return
 
-        # If your firmware needs an explicit stop command, uncomment:
-        # if CMD_STOP and self.client and self.client.is_connected:
-        #     fut = asyncio.run_coroutine_threadsafe(
-        #         self.client.write_gatt_char(TINZR_BLE_RX_CHAR_UUID, CMD_STOP),
-        #         self.loop
-        #     )
-        #     try:
-        #         fut.result()
-        #     except Exception as e:
-        #         self.set_status(f"Stop cmd error: {e}")
+        # 👉 SEND STOP COMMAND TO WEARABLE
+        if CMD_STOP and self.client and self.client.is_connected:
+            fut = asyncio.run_coroutine_threadsafe(
+                self.client.write_gatt_char(TINZR_BLE_RX_CHAR_UUID, CMD_STOP),
+                self.loop
+            )
+            try:
+                fut.result()
+            except Exception as e:
+                self.set_status(f"Stop cmd error: {e}")
 
         self.streaming = False
-        self.btn_start.setEnabled(True)
-        self.btn_stop.setEnabled(False)
-        self.btn_rec_start.setEnabled(False)
+        self.toggle_record.setEnabled(False)
+
         # also stop recording if it was running
         if self.recording:
             self.on_stop_recording_clicked()
+            self._block_and_set(self.toggle_record, False)
+
         self.set_status("Streaming stopped")
 
-    # ============ Recording ============
+    # ============ Recording via toggle ============
+    def on_record_toggled(self, checked: bool):
+        if checked:
+            self.on_start_recording_clicked()
+            if not self.recording:
+                # if recording failed, revert toggle
+                self._block_and_set(self.toggle_record, False)
+        else:
+            self.on_stop_recording_clicked()
+
     def on_start_recording_clicked(self):
         if not self.streaming:
             self.set_status("Start data before recording")
+            self.recording = False
             return
 
         if self.recording:
@@ -497,37 +752,123 @@ class WearableViewer(QtWidgets.QWidget):
             "CSV Files (*.csv);;All Files (*)",
         )
         if not fname:
+            self.recording = False
             return
 
+        # Open file, but we will write metadata+data on stop
         try:
-            self.record_file = open(fname, "w", buffering=1)  # line buffered
+            self.record_file = open(fname, "w", buffering=1)
+            self.record_path = fname
         except Exception as e:
             self.set_status(f"File error: {e}")
             self.record_file = None
+            self.record_path = None
+            self.recording = False
             return
 
-        # header
-        self.record_file.write("sample,ax,ay,az,gx,gy,gz,red,ir\n")
+        # clear recording buffers
+        self.rec_idx_raw.clear()
+        for k in self.rec_data_raw:
+            self.rec_data_raw[k].clear()
+
         self.recording = True
-        self.btn_rec_start.setEnabled(False)
-        self.btn_rec_stop.setEnabled(True)
-        self.set_status(f"Recording to: {fname}")
+        self.set_status(f"Recording (buffering) to: {fname}")
 
     def on_stop_recording_clicked(self):
         if not self.recording:
             return
 
         self.recording = False
-        if self.record_file is not None:
+
+        # If no file / no data, just clean up
+        if self.record_file is None or self.record_path is None:
+            self.set_status("Recording stopped (no file)")
+            return
+
+        # Grab references then clear handle so we don't double-close
+        f = self.record_file
+        self.record_file = None
+
+        # If no samples recorded, just write minimal header
+        n_raw = len(self.rec_idx_raw)
+        if n_raw < 2:
             try:
-                self.record_file.close()
+                f.write("# TinZr Wearable Recording (no data)\n")
+                f.write(f"# DateTime: {datetime.now().isoformat()}\n")
+                f.write(f"# Fs_out_Hz: {self.record_fs:.6f}\n")
+                f.write("time_s,red,ir,ax,ay,az,gx,gy,gz\n")
+                f.close()
             except Exception:
                 pass
-            self.record_file = None
+            self.set_status("Recording stopped (no samples)")
+            return
 
-        self.btn_rec_start.setEnabled(self.streaming)
-        self.btn_rec_stop.setEnabled(False)
-        self.set_status("Recording stopped")
+        # ===== Resample to 240 Hz and write =====
+        try:
+            # Use estimated original Fs if available, else fall back
+            fs_orig = self.fs_est if (self.fs_est is not None and self.fs_est > 0) else self.record_fs
+
+            idx = np.asarray(self.rec_idx_raw, dtype=float)
+            # Build raw time axis assuming uniform Fs_orig
+            t_raw = (idx - idx[0]) / fs_orig  # start at 0
+            t_end = t_raw[-1]
+
+            # 240 Hz grid from 0 to t_end (exclusive)
+            dt_out = 1.0 / self.record_fs
+            n_out = int(t_end * self.record_fs)
+            if n_out < 1:
+                n_out = 1
+            t_ds = np.linspace(0.0, (n_out - 1) * dt_out, n_out, endpoint=True)
+
+            # Resample each channel onto t_ds
+            data_out = {}
+            for key in self.signal_order:
+                vals = np.asarray(self.rec_data_raw[key], dtype=float)
+                data_out[key] = np.interp(t_ds, t_raw, vals)
+
+            # ---- Write metadata ----
+            f.write("# TinZr Wearable Recording\n")
+            f.write(f"# DateTime: {datetime.now().isoformat()}\n")
+            f.write(f"# Fs_orig_Hz: {fs_orig:.6f}\n")
+            f.write(f"# Fs_out_Hz: {self.record_fs:.6f}\n")
+            f.write(f"# N_raw: {n_raw}\n")
+            f.write(f"# N_out: {n_out}\n")
+            f.write("# Columns: time_s, red, ir, ax, ay, az, gx, gy, gz\n")
+
+            # ---- Header ----
+            f.write("time_s,red,ir,ax,ay,az,gx,gy,gz\n")
+
+            # ---- Data rows ----
+            red_out = data_out["red"]
+            ir_out  = data_out["ir"]
+            ax_out  = data_out["ax"]
+            ay_out  = data_out["ay"]
+            az_out  = data_out["az"]
+            gx_out  = data_out["gx"]
+            gy_out  = data_out["gy"]
+            gz_out  = data_out["gz"]
+
+            for i in range(n_out):
+                f.write(
+                    f"{t_ds[i]:.6f},"
+                    f"{red_out[i]:.6f},{ir_out[i]:.6f},"
+                    f"{ax_out[i]:.6f},{ay_out[i]:.6f},{az_out[i]:.6f},"
+                    f"{gx_out[i]:.6f},{gy_out[i]:.6f},{gz_out[i]:.6f}\n"
+                )
+
+            f.close()
+            self.set_status(f"Recording saved (resampled to {self.record_fs:.1f} Hz)")
+        except Exception as e:
+            try:
+                f.close()
+            except Exception:
+                pass
+            self.set_status(f"Recording error: {e}")
+
+        # Clear rec buffers
+        self.rec_idx_raw.clear()
+        for k in self.rec_data_raw:
+            self.rec_data_raw[k].clear()
 
     # ============ BLE Notification Handler ============
     def on_rx(self, handle, data: bytes):
@@ -569,15 +910,17 @@ class WearableViewer(QtWidgets.QWidget):
             self.data_raw["red"].append(red)
             self.data_raw["ir"].append(ir)
 
-            # live recording
-            if self.recording and self.record_file is not None:
-                try:
-                    self.record_file.write(
-                        f"{self.sample_count},{ax},{ay},{az},"
-                        f"{gx},{gy},{gz},{red},{ir}\n"
-                    )
-                except Exception:
-                    pass
+            # ---- Recording buffers (for resampling later) ----
+            if self.recording:
+                self.rec_idx_raw.append(self.sample_count)
+                self.rec_data_raw["ax"].append(ax)
+                self.rec_data_raw["ay"].append(ay)
+                self.rec_data_raw["az"].append(az)
+                self.rec_data_raw["gx"].append(gx)
+                self.rec_data_raw["gy"].append(gy)
+                self.rec_data_raw["gz"].append(gz)
+                self.rec_data_raw["red"].append(red)
+                self.rec_data_raw["ir"].append(ir)
 
         # Drop consumed bytes
         remaining = n_bytes - n_frames * FRAME_SIZE
@@ -586,13 +929,13 @@ class WearableViewer(QtWidgets.QWidget):
         else:
             self.byte_buf.clear()
 
-        # Hard cap on raw buffer size
+        # Hard cap on raw buffer size (for plotting only)
         if len(self.idx_raw) > MAX_RAW_SAMPLES:
             self.idx_raw = self.idx_raw[-MAX_RAW_SAMPLES:]
             for k in self.data_raw:
                 self.data_raw[k] = self.data_raw[k][-MAX_RAW_SAMPLES:]
 
-        # ===== Fs auto-calibration =====
+        # ===== Fs auto-calibration (for plotting + fs_orig) =====
         if self.fs_est is None:
             if self.calib_start_time is None:
                 self.calib_start_time = time.perf_counter()
@@ -604,6 +947,8 @@ class WearableViewer(QtWidgets.QWidget):
                     if dt > 0:
                         self.fs_est = n / dt
                         print(f"[FS CALIBRATED] ≈ {self.fs_est:.2f} Hz")
+                        self.set_status("Streaming")
+
 
     # ============ Plot Update ============
     def update_plot(self):
@@ -689,7 +1034,7 @@ class WearableViewer(QtWidgets.QWidget):
 # ================== Main ==================
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
+    # optional: app.setStyle("Fusion")
     w = WearableViewer()
-    w.resize(1500, 2000)
     w.show()
     sys.exit(app.exec_())
