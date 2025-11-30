@@ -9,10 +9,14 @@
 #include <Adafruit_LSM6DS3TRC.h>
 #include <Adafruit_Sensor.h>
 #include "MAX30105.h"
+#include "spo2_algorithm.h"
 
 // ---------- Global/local sensor instances ----------
 static Adafruit_LSM6DS3TRC sImu;
 static MAX30105            sPpg;
+
+// Static self pointer for BLE callback trampoline
+TinZrWearable* TinZrWearable::_self = nullptr;
 
 // Non-blocking PPG reader using SparkFun's internal ring buffer.
 // This mimics getRed()/getIR() but without safeCheck() blocking.
@@ -165,17 +169,21 @@ static void max30102_config() {
 }
 
 // ===== Packed binary frames for BLE =====
-static const uint8_t FRAMES_PER_PACKET = 10;
+static const uint8_t FRAMES_PER_PACKET = 9;
 
 // Scaling factors (match Python viewer)
 static constexpr float ACC_SCALE = 1000.0f;  // accel: m/s^2 → milli-units
 static constexpr float GYR_SCALE = 100.0f;   // gyro:  rad/s or dps → centi-units
 
+// --- HR / SpO2 + battery in frame ---
 struct __attribute__((packed)) WearFrame {
-	int16_t ax, ay, az;   // accel * ACC_SCALE
-	int16_t gx, gy, gz;   // gyro  * GYR_SCALE
-	uint32_t red;         // raw PPG red
-	uint32_t ir;          // raw PPG ir
+	int16_t  ax, ay, az;   // accel * ACC_SCALE
+	int16_t  gx, gy, gz;   // gyro  * GYR_SCALE
+	uint32_t red;          // raw PPG red
+	uint32_t ir;           // raw PPG ir
+	uint8_t  hr_bpm;       // last computed heart rate
+	uint8_t  spo2_pct;     // last computed SpO2
+	uint8_t  batt_pct;     // last battery % (0–100)
 };
 
 static WearFrame sFrameBuf[FRAMES_PER_PACKET];
@@ -183,6 +191,92 @@ static uint8_t   sFrameCount = 0;
 
 // Optional IR threshold if you want to gate on "finger present"
 static const uint32_t IR_THRESHOLD = 30000;
+
+// ====== HR / SpO2 state, updated every 5 s ======
+static uint16_t      sLastHr             = 0;
+static uint16_t      sLastSpo2           = 0;
+static unsigned long sLastHrSpo2UpdateMs = 0;
+static const unsigned long HR_SPO2_UPDATE_INTERVAL_MS = 5000UL; // 5 seconds
+
+// ====== Battery state, updated every 5 min (or on demand) ======
+static uint16_t      sLastBattPct      = 0;
+static unsigned long sLastBattSampleMs = 0;
+static const unsigned long BATT_PERIOD_MS = 5UL * 60UL * 1000UL; // 5 minutes
+
+// Read battery % from TinZrCore and clamp 0..100
+static uint16_t read_battery_pct()
+{
+	float pct = TinZr.batteryPercent();   // TinZrCore API
+
+	if (pct < 0.0f)   pct = 0.0f;
+	if (pct > 100.0f) pct = 100.0f;
+
+	return static_cast<uint16_t>(pct + 0.5f); // round to nearest integer
+}
+
+// OPTIONAL: call this from any "battery query" command handler you already have
+void TinZrWearable::forceBatteryUpdate()
+{
+	// force a refresh on the next _handleStreaming() tick
+	sLastBattSampleMs = 0;
+}
+
+// -------- HR / SpO2 computation using Maxim algorithm --------
+// Uses a sliding buffer of 100 samples (BUFFER_SIZE in spo2_algorithm.h)
+static void update_hr_spo2_from_ppg(uint32_t red, uint32_t ir)
+{
+	const int N_SAMPLES = BUFFER_SIZE;
+	static uint32_t ir_buf[N_SAMPLES];
+	static uint32_t red_buf[N_SAMPLES];
+	static int idx25          = 0;
+	static int decim_counter  = 0;
+
+	// ---- 1) Decimate 250 Hz → 25 Hz ----
+	decim_counter++;
+	if (decim_counter < 10)
+		return;
+	decim_counter = 0;
+
+	// ---- 2) If no finger → just reset algorithm state ----
+	if (ir < IR_THRESHOLD) {
+		idx25   = 0;  // restart streaming for algorithm
+		sLastHr = 0;
+		sLastSpo2 = 0;
+		return;
+	}
+
+	// ---- 3) Store decimated sample ----
+	ir_buf[idx25]  = ir;
+	red_buf[idx25] = red;
+	idx25++;
+
+	// Not enough samples for the algorithm
+	if (idx25 < N_SAMPLES)
+		return;
+
+	// ---- 4) Full window → run Maxim algorithm ----
+	idx25 = 0;
+
+	int32_t spo2;
+	int8_t  spo2_valid;
+	int32_t hr;
+	int8_t  hr_valid;
+
+	maxim_heart_rate_and_oxygen_saturation(
+		ir_buf, N_SAMPLES,
+		red_buf,
+		&spo2, &spo2_valid,
+		&hr,   &hr_valid
+	);
+
+	// ---- 5) Validate ----
+	if (hr_valid && hr > 20 && hr < 230)
+		sLastHr = hr;
+
+	if (spo2_valid && spo2 >= 60 && spo2 <= 100)
+		sLastSpo2 = spo2;
+}
+
 
 // ---------------- TinZrWearable ------------------
 
@@ -225,6 +319,11 @@ void TinZrWearable::begin(const TinZrWearableConfig& cfg) {
 			_statusLED.setMode(TinZrStatusLED::Mode::WIFI_FAIL);
 		} else {
 			Serial.println("🔵 BLE started (advertising)");
+
+			// Register BLE message callback (S / E / BAT)
+			_self = this;
+			_ble.onMessage(&TinZrWearable::_bleCallbackStatic);
+
 			_bleWasConnected = _ble.isConnected();
 			_statusLED.setMode(TinZrStatusLED::Mode::BLE_ADVERTISING);
 		}
@@ -264,7 +363,12 @@ void TinZrWearable::begin(const TinZrWearableConfig& cfg) {
 	_streaming    = false;
 	_lastSampleMs = 0;
 
-	sFrameCount = 0;
+	sFrameCount          = 0;
+	sLastHr              = 0;
+	sLastSpo2            = 0;
+	sLastHrSpo2UpdateMs  = 0;
+	sLastBattPct         = 0;
+	sLastBattSampleMs    = 0;
 
 	_updateLED();
 
@@ -277,7 +381,7 @@ void TinZrWearable::handle() {
 	// Soft power
 	TinZr.handle();
 	_statusLED.handle();
-	
+
 	if (!TinZr.isSoftOn()) {
 		_statusLED.setMode(TinZrStatusLED::Mode::OFF);
 		return;
@@ -314,6 +418,42 @@ void TinZrWearable::_handleBLE() {
 #endif
 }
 
+// ========== BLE command callback (S / E / BAT) ==========
+void TinZrWearable::_bleCallbackStatic(IPAddress from,
+                                       const uint8_t* data,
+                                       size_t len)
+{
+	(void)from;  // unused for now
+	if (!_self || !data || len == 0) return;
+	_self->_handleBleCommand(data, len);
+}
+
+void TinZrWearable::_handleBleCommand(const uint8_t* data, size_t len)
+{
+	// Commands are tiny ASCII strings: "S", "E", "BAT"
+	String s;
+	s.reserve(len + 1);
+	for (size_t i = 0; i < len; ++i) {
+		s += char(data[i]);
+	}
+	s.trim();
+	if (!s.length()) return;
+
+	Serial.print("BLE CMD: ");
+	Serial.println(s);
+
+	if (s.equalsIgnoreCase("S")) {
+		Serial.println("→ START streaming");
+		_applyStreamingChange(true);
+	} else if (s.equalsIgnoreCase("E")) {
+		Serial.println("→ STOP streaming");
+		_applyStreamingChange(false);
+	} else if (s.equalsIgnoreCase("BAT")) {
+		Serial.println("→ BATTERY refresh requested");
+		forceBatteryUpdate();   // sets sLastBattSampleMs = 0 so next tick re-reads battery
+	}
+}
+
 // ================= STREAM TOGGLE ================
 void TinZrWearable::_applyStreamingChange(bool enable) {
 	if (enable == _streaming) return;
@@ -325,9 +465,13 @@ void TinZrWearable::_applyStreamingChange(bool enable) {
 			return;
 		}
 
-		_streaming    = true;
-		sFrameCount   = 0;
-		_lastSampleMs = 0;
+		_streaming           = true;
+		sFrameCount          = 0;
+		_lastSampleMs        = 0;
+		sLastHr              = 0;
+		sLastSpo2            = 0;
+		sLastHrSpo2UpdateMs  = 0;
+
 		Serial.println("▶ Streaming started (BLE only, raw I2C)");
 	} else {
 		_streaming = false;
@@ -385,10 +529,34 @@ void TinZrWearable::_handleStreaming() {
 	//     ir_raw  = 0;
 	// }
 
+	// ---------- Feed every sample into HR / SpO2 estimator ----------
+	update_hr_spo2_from_ppg(red_raw, ir_raw);
+
+	// Only print every 5 seconds for debugging
+	if (sLastHrSpo2UpdateMs == 0 ||
+		(now - sLastHrSpo2UpdateMs) >= HR_SPO2_UPDATE_INTERVAL_MS)
+	{
+		sLastHrSpo2UpdateMs = now;
+
+		Serial.print("💓 HR update: ");
+		Serial.print(sLastHr);
+		Serial.print(" bpm, SpO2: ");
+		Serial.print(sLastSpo2);
+		Serial.println(" %");
+	}
+
+	// ---------- Battery refresh (every 5 min or forced) ----------
+	if (sLastBattSampleMs == 0 ||
+		(now - sLastBattSampleMs) >= BATT_PERIOD_MS)
+	{
+		sLastBattSampleMs = now;
+		sLastBattPct      = read_battery_pct();
+	}
+
 	// ---------- Pack into binary frame ----------
 	WearFrame &f = sFrameBuf[sFrameCount];
 
-	// accel raw → scaled (example scales – adjust to match your Python)
+	// accel raw → scaled
 	f.ax = (int16_t)((float)ax_raw * (ACC_SCALE / 16384.0f));
 	f.ay = (int16_t)((float)ay_raw * (ACC_SCALE / 16384.0f));
 	f.az = (int16_t)((float)az_raw * (ACC_SCALE / 16384.0f));
@@ -398,8 +566,11 @@ void TinZrWearable::_handleStreaming() {
 	f.gy = (int16_t)((float)gy_raw * (GYR_SCALE / 131.0f));
 	f.gz = (int16_t)((float)gz_raw * (GYR_SCALE / 131.0f));
 
-	f.red = red_raw;
-	f.ir  = ir_raw;
+	f.red      = red_raw;
+	f.ir       = ir_raw;
+	f.hr_bpm   = sLastHr;      // updated every ~5 s
+	f.spo2_pct = sLastSpo2;    // updated every ~5 s
+	f.batt_pct = sLastBattPct; // updated every ~5 min or on BAT command
 
 	sFrameCount++;
 
