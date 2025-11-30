@@ -9,7 +9,8 @@
 
 struct TinZrWearableConfig {
 	const char* hostname           = "TinZrWearable";
-	uint16_t    sample_interval_ms = 4;  // default ~250 Hz target
+	// Sampling interval in ms (4 ms ≈ 250 Hz target, resampled to 240 Hz on hub)
+	uint16_t    sample_interval_ms = 4;
 };
 
 // We keep enum for future flexibility, but effectively use BLE_ONLY.
@@ -25,6 +26,7 @@ public:
 	TinZrWearable();
 	void begin(const TinZrWearableConfig& cfg);
 	void handle();
+	void forceBatteryUpdate();
 
 private:
 	TinZrWearableConfig _cfg{};
@@ -46,6 +48,12 @@ private:
 	bool              _wasSoftOn      = false;    
 
 	// Internal handlers
+	static TinZrWearable* _self;
+    static void _bleCallbackStatic(IPAddress from,
+                                   const uint8_t* data,
+                                   size_t len);
+    void _handleBleCommand(const uint8_t* data, size_t len);
+
 	void _handleBLE();
 	void _handleStreaming();
 	void _applyStreamingChange(bool enable);

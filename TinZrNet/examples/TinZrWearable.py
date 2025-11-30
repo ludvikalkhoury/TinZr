@@ -24,24 +24,34 @@ TINZR_BLE_TX_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a9"
 DEVICE_PREFIX = "TinZr"
 
 # Optional commands if your firmware supports them (adjust as needed)
-CMD_START = b"S"   # example
-CMD_STOP  = b"E"   # example
+CMD_START = b"S"
+CMD_STOP  = b"E"
+# Dedicated battery query command
+CMD_BATT = b"BAT"
 
 # ================== Frame format (must match C++) ==============
-# struct WearFrame {
-#   int16_t ax, ay, az;
-#   int16_t gx, gy, gz;
-#   uint32_t red;
-#   uint32_t ir;
-# } __attribute__((packed));
+# struct __attribute__((packed)) WearFrame {
+#   int16_t  ax, ay, az;   // accel * 1000
+#   int16_t  gx, gy, gz;   // gyro  * 100
+#   uint32_t red;          // raw PPG red
+#   uint32_t ir;           // raw PPG ir
+#   uint8_t  hr_bpm;       // HR
+#   uint8_t  spo2_pct;     // SpO2
+#   uint8_t  batt_pct;     // battery [%]
+# };
 #
-# => little-endian: <hhhhhhII
-FRAME_STRUCT = struct.Struct("<hhhhhhII")
-FRAME_SIZE   = FRAME_STRUCT.size  # 20 bytes
+# little-endian format:
+#   6 * int16  -> hhhhhh
+#   2 * uint32 -> II
+#   3 * uint8  -> BBB
+#
+# => "<hhhhhhIIBBB"
+FRAME_STRUCT = struct.Struct("<hhhhhhIIBBB")
+FRAME_SIZE   = FRAME_STRUCT.size  # 23 bytes
 
 # accel & gyro scales (inverse of firmware scaling)
-ACC_SCALE = 1e-3   # milli-units -> m/s^2
-GYR_SCALE = 1e-3   # milli-units -> rad/s (or dps-ish)
+ACC_SCALE = 1e-3         # milli-units -> m/s^2  (firmware sends accel * 1000)
+GYR_SCALE = 1.0 / 100.0  # centi-units -> dps-ish or rad/s-ish
 
 # ================== Viewer Config ==================
 FS_RESAMP_HZ    = 240.0   # desired *fixed* output Fs (plot + save)
@@ -193,6 +203,120 @@ class Spinner(QtWidgets.QWidget):
             p.drawLine(QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2))
 
 
+# ================== Battery Widget ==================
+class BatteryWidget(QtWidgets.QWidget):
+    """
+    Horizontal battery indicator with:
+      - body + small terminal
+      - fill color depending on % (green/yellow/red)
+      - percentage text inside
+      - emits clicked() when user left-clicks it
+    """
+    clicked = QtCore.pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._level = None  # None = unknown; 0–100 = valid
+        self.setFixedSize(80, 28)
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+
+    def sizeHint(self):
+        return QtCore.QSize(80, 28)
+
+    def setLevel(self, pct):
+        """pct can be None or 0–100."""
+        if pct is None:
+            self._level = None
+        else:
+            self._level = max(0.0, min(100.0, float(pct)))
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+
+        rect = self.rect()
+        w = rect.width()
+        h = rect.height()
+
+        # ----- Geometry -----
+        margin = 3
+        body_rect = QtCore.QRectF(
+            margin,
+            margin,
+            w - margin * 3,   # leave room for terminal
+            h - margin * 2
+        )
+
+        term_width = 6
+        term_rect = QtCore.QRectF(
+            body_rect.right(),
+            body_rect.center().y() - (body_rect.height() * 0.25),
+            term_width,
+            body_rect.height() * 0.5
+        )
+
+        # ----- Colors -----
+        bg_body = QtGui.QColor("#020817")
+        border  = QtGui.QColor("#E0E8FF")
+        empty_fill = QtGui.QColor("#111827")
+
+        if self._level is None:
+            fill_color = empty_fill
+        else:
+            if self._level >= 60:
+                fill_color = QtGui.QColor("#4CAF50")  # green
+            elif self._level >= 30:
+                fill_color = QtGui.QColor("#FFC107")  # yellow
+            else:
+                fill_color = QtGui.QColor("#F44336")  # red
+
+        # ----- Draw body -----
+        p.setPen(QtGui.QPen(border, 1.5))
+        p.setBrush(bg_body)
+        radius = body_rect.height() * 0.3
+        p.drawRoundedRect(body_rect, radius, radius)
+
+        # ----- Fill -----
+        if self._level is not None:
+            level_frac = self._level / 100.0
+            level_frac = max(0.0, min(1.0, level_frac))
+
+            fill_rect = QtCore.QRectF(body_rect)
+            fill_rect.setWidth(body_rect.width() * level_frac)
+            fill_rect.adjust(1.5, 1.5, -1.5, -1.5)
+
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(fill_color)
+            if fill_rect.width() > 0:
+                p.drawRoundedRect(fill_rect, radius * 0.7, radius * 0.7)
+
+        # ----- Terminal -----
+        p.setPen(QtGui.QPen(border, 1.2))
+        p.setBrush(bg_body)
+        p.drawRoundedRect(term_rect, 2, 2)
+
+        # ----- Text -----
+        if self._level is None:
+            text = "--"
+        else:
+            text = f"{int(round(self._level))}"
+
+        font = QtGui.QFont(self.font())
+        font.setPointSize(7)
+        font.setBold(True) 
+        p.setFont(font)
+        p.setPen(QtGui.QColor("#E0E8FF"))
+        p.drawText(body_rect, QtCore.Qt.AlignCenter, text)
+
+        p.end()
+
+
 # ================== Main Viewer ==================
 class WearableViewer(QtWidgets.QWidget):
     scan_finished = QtCore.pyqtSignal(object, object)  # (devices, error)
@@ -201,7 +325,6 @@ class WearableViewer(QtWidgets.QWidget):
         super().__init__()
 
         self.setWindowTitle("TinZr Wearable")
-        # Window icon (TinZr_logo.ico in same folder)
         self.setWindowIcon(QtGui.QIcon("TinZr_small_logo.ico"))
 
         # ---------- Fixed size window ----------
@@ -226,6 +349,11 @@ class WearableViewer(QtWidgets.QWidget):
 
         header_layout.addWidget(title_label, 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         header_layout.addStretch(1)
+
+        # 🔋 Fancy battery widget at top-right of GUI
+        self.batt_widget = BatteryWidget()
+        self.batt_widget.clicked.connect(self.on_batt_clicked)
+        header_layout.addWidget(self.batt_widget, 0, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
 
         main_layout.addWidget(header)
 
@@ -309,6 +437,8 @@ class WearableViewer(QtWidgets.QWidget):
             "gx", "gy", "gz",
         ]
 
+        self.rec_keys = self.signal_order + ["hr", "spo2", "batt"]
+
         colors = {
             "red": "#ff4444",
             "ir":  "#aaaaaa",
@@ -353,6 +483,14 @@ class WearableViewer(QtWidgets.QWidget):
             self.axes[key] = p
             self.curves[key] = curve
 
+        # ================== HR / SpO2 / battery state ==================
+        self.hr_bpm = None
+        self.spo2_pct = None
+        self.batt_pct = None
+
+        # Small HUD overlay (top-right over the plots)
+        self._init_hud()
+
         # ================== Buffers (plotting) ==================
         self.sample_count = 0            # raw sample index from firmware (1,2,3,...)
         self.idx_raw = []                # indices
@@ -379,7 +517,8 @@ class WearableViewer(QtWidgets.QWidget):
 
         # ===== Recording buffers (for 240 Hz resampling on stop) =====
         self.rec_idx_raw = []
-        self.rec_data_raw = {k: [] for k in self.signal_order}
+        self.rec_data_raw = {k: [] for k in self.rec_keys}
+
         self.record_fs = FS_RESAMP_HZ  # forced output Fs (240 Hz)
 
         # BLE stuff
@@ -463,6 +602,109 @@ class WearableViewer(QtWidgets.QWidget):
             font-size: 10pt;
         }
         """)
+
+    # ---------- HUD (HR / SpO2 / Battery) ----------
+    def _init_hud(self):
+        # small floating label overlay over the plots
+        self.lbl_hr_spo2 = QtWidgets.QLabel(self.graphics)
+        self.lbl_hr_spo2.setStyleSheet("""
+            QLabel {
+                color: #FFFFFF;
+                font-size: 8pt;
+                font-weight: 500;
+                background-color: rgba(0, 0, 0, 120);
+                padding: 2px 6px;
+                border-radius: 6px;
+            }
+        """)
+        self.lbl_hr_spo2.setText("HR: -- bpm   SpO₂: -- %")
+
+        # transparent to mouse, doesn't block interaction
+        self.lbl_hr_spo2.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+
+        self.lbl_hr_spo2.adjustSize()
+        self.lbl_hr_spo2.show()
+        self.lbl_hr_spo2.raise_()
+
+        # initial positioning (may be refined after showEvent)
+        self._position_hr_hud()
+
+    def _position_hr_hud(self):
+        if not self.isVisible():
+            return
+
+        if "red" in self.axes:
+            # Use the red plot viewbox as anchor
+            vb = self.axes["red"].getViewBox()
+            br = vb.sceneBoundingRect()
+            p = self.graphics.mapFromScene(br.topRight())
+
+            # Top-right, slightly higher
+            x = int(p.x() - self.lbl_hr_spo2.width() - 10)
+            y = int(p.y() - 40)
+        else:
+            # Fallback: top-right of the graphics widget
+            g = self.graphics.geometry()
+            x = g.x() + g.width() - self.lbl_hr_spo2.width() - 10
+            y = g.y() + 4
+
+        self.lbl_hr_spo2.move(x, y)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_hr_hud()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Reposition once the widget has its final geometry
+        QtCore.QTimer.singleShot(0, self._position_hr_hud)
+
+    def _update_hud(self):
+        # ---- HR ----
+        if self.hr_bpm is not None and self.hr_bpm > 0:
+            hr_text = f"HR: {int(self.hr_bpm)} bpm"
+        else:
+            hr_text = "HR: -- bpm"
+
+        # ---- SpO2 ----
+        if self.spo2_pct is not None and self.spo2_pct > 0:
+            spo2_text = f"SpO₂: {int(self.spo2_pct)} %"
+        else:
+            spo2_text = "SpO₂: -- %"
+
+        self.lbl_hr_spo2.setText(f"{hr_text}   {spo2_text}")
+        self.lbl_hr_spo2.adjustSize()
+        self._position_hr_hud()
+
+        # ---- Battery ----
+        if hasattr(self, "batt_widget"):
+            if self.batt_pct is not None and self.batt_pct >= 0:
+                self.batt_widget.setLevel(self.batt_pct)
+            else:
+                self.batt_widget.setLevel(None)
+
+    # ---------- Battery click handler ----------
+    def on_batt_clicked(self):
+        """
+        Called when user clicks the battery widget.
+        Sends CMD_BATT so firmware can push an updated battery value.
+        """
+        if not CMD_BATT:
+            self.set_status("Battery command not configured")
+            return
+
+        if self.client and self.client.is_connected:
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    self.client.write_gatt_char(TINZR_BLE_RX_CHAR_UUID, CMD_BATT),
+                    self.loop
+                )
+                fut.result()
+                self.set_status("Requested battery refresh")
+            except Exception as e:
+                self.set_status(f"Battery refresh error: {e}")
+        else:
+            self.set_status("Connect to TinZr to query battery")
 
     # ---------- Spinner centering on button ----------
     def _center_spinner_on_button(self):
@@ -632,6 +874,8 @@ class WearableViewer(QtWidgets.QWidget):
 
         self.client = None
 
+        self.byte_buf.clear()
+
         # stop streaming / recording if needed
         if self.streaming:
             self.on_stop_data_clicked()
@@ -686,6 +930,8 @@ class WearableViewer(QtWidgets.QWidget):
         for k in self.data_raw:
             self.data_raw[k].clear()
 
+        self.byte_buf.clear()
+
         self.fs_est = None
         self.calib_start_time = None
         self.calib_start_count = None
@@ -699,6 +945,12 @@ class WearableViewer(QtWidgets.QWidget):
         self.rec_idx_raw.clear()
         for k in self.rec_data_raw:
             self.rec_data_raw[k].clear()
+
+        # Reset HUD state
+        self.hr_bpm = None
+        self.spo2_pct = None
+        self.batt_pct = None
+        self._update_hud()
 
     def on_stop_data_clicked(self):
         if not self.streaming:
@@ -796,7 +1048,7 @@ class WearableViewer(QtWidgets.QWidget):
                 f.write("# TinZr Wearable Recording (no data)\n")
                 f.write(f"# DateTime: {datetime.now().isoformat()}\n")
                 f.write(f"# Fs_out_Hz: {self.record_fs:.6f}\n")
-                f.write("time_s,red,ir,ax,ay,az,gx,gy,gz\n")
+                f.write("time_s,red,ir,ax,ay,az,gx,gy,gz,hr_bpm,spo2_pct,batt_pct\n")
                 f.close()
             except Exception:
                 pass
@@ -821,10 +1073,23 @@ class WearableViewer(QtWidgets.QWidget):
             t_ds = np.linspace(0.0, (n_out - 1) * dt_out, n_out, endpoint=True)
 
             # Resample each channel onto t_ds
+            # HR/SpO2/Batt as ZOH, others linear
+            def zoh_resample(vals, t_raw, t_ds):
+                vals = np.asarray(vals, dtype=float)
+                if len(vals) == 0:
+                    return np.zeros_like(t_ds)
+                idx_axis = np.arange(len(vals), dtype=float)
+                pos = np.interp(t_ds, t_raw, idx_axis)
+                pos_idx = np.clip(np.floor(pos).astype(int), 0, len(vals) - 1)
+                return vals[pos_idx]
+
             data_out = {}
-            for key in self.signal_order:
+            for key in self.rec_keys:
                 vals = np.asarray(self.rec_data_raw[key], dtype=float)
-                data_out[key] = np.interp(t_ds, t_raw, vals)
+                if key in ("hr", "spo2", "batt"):
+                    data_out[key] = zoh_resample(vals, t_raw, t_ds)
+                else:
+                    data_out[key] = np.interp(t_ds, t_raw, vals)
 
             # ---- Write metadata ----
             f.write("# TinZr Wearable Recording\n")
@@ -833,27 +1098,31 @@ class WearableViewer(QtWidgets.QWidget):
             f.write(f"# Fs_out_Hz: {self.record_fs:.6f}\n")
             f.write(f"# N_raw: {n_raw}\n")
             f.write(f"# N_out: {n_out}\n")
-            f.write("# Columns: time_s, red, ir, ax, ay, az, gx, gy, gz\n")
+            f.write("# Columns: time_s, red, ir, ax, ay, az, gx, gy, gz, hr_bpm, spo2_pct, batt_pct\n")
 
             # ---- Header ----
-            f.write("time_s,red,ir,ax,ay,az,gx,gy,gz\n")
+            f.write("time_s,red,ir,ax,ay,az,gx,gy,gz,hr_bpm,spo2_pct,batt_pct\n")
 
             # ---- Data rows ----
-            red_out = data_out["red"]
-            ir_out  = data_out["ir"]
-            ax_out  = data_out["ax"]
-            ay_out  = data_out["ay"]
-            az_out  = data_out["az"]
-            gx_out  = data_out["gx"]
-            gy_out  = data_out["gy"]
-            gz_out  = data_out["gz"]
+            red_out  = data_out["red"]
+            ir_out   = data_out["ir"]
+            ax_out   = data_out["ax"]
+            ay_out   = data_out["ay"]
+            az_out   = data_out["az"]
+            gx_out   = data_out["gx"]
+            gy_out   = data_out["gy"]
+            gz_out   = data_out["gz"]
+            hr_out   = data_out["hr"]
+            spo2_out = data_out["spo2"]
+            batt_out = data_out["batt"]
 
             for i in range(n_out):
                 f.write(
                     f"{t_ds[i]:.6f},"
                     f"{red_out[i]:.6f},{ir_out[i]:.6f},"
                     f"{ax_out[i]:.6f},{ay_out[i]:.6f},{az_out[i]:.6f},"
-                    f"{gx_out[i]:.6f},{gy_out[i]:.6f},{gz_out[i]:.6f}\n"
+                    f"{gx_out[i]:.6f},{gy_out[i]:.6f},{gz_out[i]:.6f},"
+                    f"{hr_out[i]:.2f},{spo2_out[i]:.2f},{batt_out[i]:.2f}\n"
                 )
 
             f.close()
@@ -872,23 +1141,45 @@ class WearableViewer(QtWidgets.QWidget):
 
     # ============ BLE Notification Handler ============
     def on_rx(self, handle, data: bytes):
-        """Incoming BLE notifications (BINARY). Runs in BLE thread."""
-        if not self.streaming:
-            return
+        """
+        Incoming BLE notifications (BINARY). Runs in BLE thread.
 
+        We ALWAYS parse frames so battery/HR/SpO2 can update even
+        if streaming is currently False. Plot/record buffers are only
+        updated when self.streaming is True.
+        """
+        # Append new bytes to the rolling buffer
         self.byte_buf.extend(data)
 
         n_bytes = len(self.byte_buf)
         n_frames = n_bytes // FRAME_SIZE
+
         if n_frames == 0:
             return
 
         for i in range(n_frames):
             start = i * FRAME_SIZE
             chunk = self.byte_buf[start:start + FRAME_SIZE]
-            ax_i, ay_i, az_i, gx_i, gy_i, gz_i, red_i, ir_i = FRAME_STRUCT.unpack(chunk)
 
-            # Back to floats
+            (
+                ax_i, ay_i, az_i,
+                gx_i, gy_i, gz_i,
+                red_i, ir_i,
+                hr_i, spo2_i,
+                batt_i
+            ) = FRAME_STRUCT.unpack(chunk)
+
+            # ---- Update HUD state (always, even if not streaming) ----
+            self.hr_bpm   = hr_i
+            self.spo2_pct = spo2_i
+            self.batt_pct = batt_i
+
+            # If we're not streaming, don't touch sample_count or buffers.
+            # The GUI timer will still pick up the new batt/HR/SpO2.
+            if not self.streaming:
+                continue
+
+            # Back to floats for streaming/recording
             ax = ax_i * ACC_SCALE
             ay = ay_i * ACC_SCALE
             az = az_i * ACC_SCALE
@@ -921,6 +1212,9 @@ class WearableViewer(QtWidgets.QWidget):
                 self.rec_data_raw["gz"].append(gz)
                 self.rec_data_raw["red"].append(red)
                 self.rec_data_raw["ir"].append(ir)
+                self.rec_data_raw["hr"].append(float(hr_i))
+                self.rec_data_raw["spo2"].append(float(spo2_i))
+                self.rec_data_raw["batt"].append(float(batt_i))
 
         # Drop consumed bytes
         remaining = n_bytes - n_frames * FRAME_SIZE
@@ -936,7 +1230,7 @@ class WearableViewer(QtWidgets.QWidget):
                 self.data_raw[k] = self.data_raw[k][-MAX_RAW_SAMPLES:]
 
         # ===== Fs auto-calibration (for plotting + fs_orig) =====
-        if self.fs_est is None:
+        if self.streaming and self.fs_est is None:
             if self.calib_start_time is None:
                 self.calib_start_time = time.perf_counter()
                 self.calib_start_count = self.sample_count
@@ -949,9 +1243,11 @@ class WearableViewer(QtWidgets.QWidget):
                         print(f"[FS CALIBRATED] ≈ {self.fs_est:.2f} Hz")
                         self.set_status("Streaming")
 
-
     # ============ Plot Update ============
     def update_plot(self):
+        # HUD always updates from latest hr/spo2/batt
+        self._update_hud()
+
         # Wait until we know the real device Fs
         if self.fs_est is None:
             return
@@ -1034,7 +1330,6 @@ class WearableViewer(QtWidgets.QWidget):
 # ================== Main ==================
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
-    # optional: app.setStyle("Fusion")
     w = WearableViewer()
     w.show()
     sys.exit(app.exec_())
