@@ -70,12 +70,12 @@ class ToggleSwitch(QtWidgets.QCheckBox):
     def __init__(self, parent=None):
         super().__init__(parent)
         # Bigger, chunkier pill
-        self._thumb_radius = 16
-        self._track_radius = 20
-        self._margin = 4
+        self._thumb_radius = 12
+        self._track_radius = 12
+        self._margin = 3
 
-        self._width = 90
-        self._height = 44
+        self._width = 60
+        self._height = 30
 
         self.setCursor(QtCore.Qt.PointingHandCursor)
         self.setCheckable(True)
@@ -217,7 +217,7 @@ class BatteryWidget(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._level = None  # None = unknown; 0–100 = valid
-        self.setFixedSize(80, 28)
+        self.setFixedSize(50, 25)
         self.setCursor(QtCore.Qt.PointingHandCursor)
 
     def sizeHint(self):
@@ -308,7 +308,7 @@ class BatteryWidget(QtWidgets.QWidget):
             text = f"{int(round(self._level))}"
 
         font = QtGui.QFont(self.font())
-        font.setPointSize(7)
+        font.setPointSize(10)
         font.setBold(True) 
         p.setFont(font)
         p.setPen(QtGui.QColor("#E0E8FF"))
@@ -328,7 +328,7 @@ class WearableViewer(QtWidgets.QWidget):
         self.setWindowIcon(QtGui.QIcon("TinZr_small_logo.ico"))
 
         # ---------- Fixed size window ----------
-        self.setFixedSize(1200, 1400)
+        self.setFixedSize(600, 700)
         self.setWindowFlag(QtCore.Qt.MSWindowsFixedSizeDialogHint, True)
 
         # ---------- Global style / theme ----------
@@ -633,22 +633,12 @@ class WearableViewer(QtWidgets.QWidget):
         if not self.isVisible():
             return
 
-        if "red" in self.axes:
-            # Use the red plot viewbox as anchor
-            vb = self.axes["red"].getViewBox()
-            br = vb.sceneBoundingRect()
-            p = self.graphics.mapFromScene(br.topRight())
-
-            # Top-right, slightly higher
-            x = int(p.x() - self.lbl_hr_spo2.width() - 10)
-            y = int(p.y() - 40)
-        else:
-            # Fallback: top-right of the graphics widget
-            g = self.graphics.geometry()
-            x = g.x() + g.width() - self.lbl_hr_spo2.width() - 10
-            y = g.y() + 4
-
+        # Anchor to the top-right inside the graphics widget itself
+        r = self.graphics.rect()  # coordinates in graphics' own space
+        x = r.width() - self.lbl_hr_spo2.width() - 10
+        y = 10
         self.lbl_hr_spo2.move(x, y)
+
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1000,14 +990,14 @@ class WearableViewer(QtWidgets.QWidget):
         fname, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Save Recording",
-            "tinzr_recording.csv",
+            "tinzr_recording_240Hz.csv",   # hint in name that this will be resampled
             "CSV Files (*.csv);;All Files (*)",
         )
         if not fname:
             self.recording = False
             return
 
-        # Open file, but we will write metadata+data on stop
+        # Open file; we'll write everything (metadata + resampled data) on stop
         try:
             self.record_file = open(fname, "w", buffering=1)
             self.record_path = fname
@@ -1018,13 +1008,15 @@ class WearableViewer(QtWidgets.QWidget):
             self.recording = False
             return
 
-        # clear recording buffers
+        # Clear recording buffers
         self.rec_idx_raw.clear()
         for k in self.rec_data_raw:
             self.rec_data_raw[k].clear()
 
         self.recording = True
-        self.set_status(f"Recording (buffering) to: {fname}")
+        self.set_status(f"Recording (buffering, resample on stop) → {fname}")
+
+
 
     def on_stop_recording_clicked(self):
         if not self.recording:
@@ -1037,7 +1029,7 @@ class WearableViewer(QtWidgets.QWidget):
             self.set_status("Recording stopped (no file)")
             return
 
-        # Grab references then clear handle so we don't double-close
+        # Grab reference then clear handle so we don't double-close
         f = self.record_file
         self.record_file = None
 
@@ -1057,7 +1049,7 @@ class WearableViewer(QtWidgets.QWidget):
 
         # ===== Resample to 240 Hz and write =====
         try:
-            # Use estimated original Fs if available, else fall back
+            # Use estimated original Fs if available, else fall back to 240 Hz
             fs_orig = self.fs_est if (self.fs_est is not None and self.fs_est > 0) else self.record_fs
 
             idx = np.asarray(self.rec_idx_raw, dtype=float)
@@ -1065,7 +1057,7 @@ class WearableViewer(QtWidgets.QWidget):
             t_raw = (idx - idx[0]) / fs_orig  # start at 0
             t_end = t_raw[-1]
 
-            # 240 Hz grid from 0 to t_end (exclusive)
+            # 240 Hz grid from 0 to t_end
             dt_out = 1.0 / self.record_fs
             n_out = int(t_end * self.record_fs)
             if n_out < 1:
@@ -1092,7 +1084,7 @@ class WearableViewer(QtWidgets.QWidget):
                     data_out[key] = np.interp(t_ds, t_raw, vals)
 
             # ---- Write metadata ----
-            f.write("# TinZr Wearable Recording\n")
+            f.write("# TinZr Wearable Recording (resampled to fixed 240 Hz)\n")
             f.write(f"# DateTime: {datetime.now().isoformat()}\n")
             f.write(f"# Fs_orig_Hz: {fs_orig:.6f}\n")
             f.write(f"# Fs_out_Hz: {self.record_fs:.6f}\n")
@@ -1138,6 +1130,7 @@ class WearableViewer(QtWidgets.QWidget):
         self.rec_idx_raw.clear()
         for k in self.rec_data_raw:
             self.rec_data_raw[k].clear()
+
 
     # ============ BLE Notification Handler ============
     def on_rx(self, handle, data: bytes):
@@ -1329,7 +1322,14 @@ class WearableViewer(QtWidgets.QWidget):
 
 # ================== Main ==================
 if __name__ == "__main__":
+    # Let Qt scale based on DPI so 600x700 stays a similar physical size
+    if hasattr(QtCore.Qt, "AA_EnableHighDpiScaling"):
+        QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling)
+    if hasattr(QtCore.Qt, "AA_UseHighDpiPixmaps"):
+        QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps)
+
     app = QtWidgets.QApplication(sys.argv)
     w = WearableViewer()
     w.show()
     sys.exit(app.exec_())
+
