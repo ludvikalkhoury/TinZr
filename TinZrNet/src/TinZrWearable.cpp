@@ -84,16 +84,18 @@ static void lsm6_config() {
 
 	// CTRL1_XL:
 	//   ODR_XL[3:0] = 0110 → 416 Hz
-	//   FS_XL[1:0]  = 00   → ±2g
-	// So 0b0110 0000 = 0x60
-	lsm6_write8(REG_CTRL1_XL, 0x60);
+	//   FS_XL[1:0]  = 11   → ±8 g
+	//   BW_XL[1:0]  = 00   → default bandwidth
+	// Bits: 0b0110 1100 = 0x6C
+	lsm6_write8(REG_CTRL1_XL, 0x6C);
 
 	// CTRL2_G:
 	//   ODR_G[3:0] = 0110 → 416 Hz
-	//   FS_G[1:0]  = 00   → ±125 dps (or ±250dps depending on variant)
-	// 0b0110 0000 = 0x60
-	lsm6_write8(REG_CTRL2_G, 0x60);
+	//   FS_G[1:0]  = 10   → ±1000 dps
+	//  Bits: 0b0110 1000 = 0x68
+	lsm6_write8(REG_CTRL2_G, 0x68);
 }
+
 
 // Burst-read raw gyro + accel in one shot.
 // Order (12 bytes):
@@ -174,6 +176,7 @@ static const uint8_t FRAMES_PER_PACKET = 9;
 // Scaling factors (match Python viewer)
 static constexpr float ACC_SCALE = 1000.0f;  // accel: m/s^2 → milli-units
 static constexpr float GYR_SCALE = 100.0f;   // gyro:  rad/s or dps → centi-units
+static constexpr float G_SENS_DPS_PER_LSB = 35e-3f;    // 35 mdps/LSB for ±1000 dps
 
 // --- HR / SpO2 + battery in frame ---
 struct __attribute__((packed)) WearFrame {
@@ -557,14 +560,14 @@ void TinZrWearable::_handleStreaming() {
 	WearFrame &f = sFrameBuf[sFrameCount];
 
 	// accel raw → scaled
-	f.ax = (int16_t)((float)ax_raw * (ACC_SCALE / 16384.0f));
-	f.ay = (int16_t)((float)ay_raw * (ACC_SCALE / 16384.0f));
-	f.az = (int16_t)((float)az_raw * (ACC_SCALE / 16384.0f));
-
-	// gyro raw → scaled
-	f.gx = (int16_t)((float)gx_raw * (GYR_SCALE / 131.0f));
-	f.gy = (int16_t)((float)gy_raw * (GYR_SCALE / 131.0f));
-	f.gz = (int16_t)((float)gz_raw * (GYR_SCALE / 131.0f));
+	f.ax = (int16_t)((float)ax_raw * (ACC_SCALE / 4096.0f));
+	f.ay = (int16_t)((float)ay_raw * (ACC_SCALE / 4096.0f));
+	f.az = (int16_t)((float)az_raw * (ACC_SCALE / 4096.0f));
+	
+	f.gx = (int16_t)( gx_raw * (GYR_SCALE * G_SENS_DPS_PER_LSB) ); // = raw * 0.875
+	f.gy = (int16_t)( gy_raw * (GYR_SCALE * G_SENS_DPS_PER_LSB) );
+	f.gz = (int16_t)( gz_raw * (GYR_SCALE * G_SENS_DPS_PER_LSB) );
+	
 
 	f.red      = red_raw;
 	f.ir       = ir_raw;
