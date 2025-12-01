@@ -1,0 +1,2 @@
+TinZrWearableSetup.exe filter=lfs diff=lfs merge=lfs -text
+TinZrWearable.exe filter=lfs diff=lfs merge=lfs -text
