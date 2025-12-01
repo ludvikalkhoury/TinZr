@@ -363,8 +363,9 @@ class WifiHubTab(QtWidgets.QWidget):
         self._set_status("Hub stopped", "gray")
         self._log("[HUB] Stopped.")
 
+
     # ------------------------------------------------------------------
-    # UDP listener (same logic)
+    # UDP listener (same logic, but HELLO is now silent)
     # ------------------------------------------------------------------
     def _udp_listener_thread(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -402,20 +403,22 @@ class WifiHubTab(QtWidgets.QWidget):
 
             ip, port = addr
             text = data.decode("utf-8", errors="replace").strip()
-            self._log(f"[UDP RX] from {ip}:{port} -> {text!r}")
 
             # HELLO from node: "HELLO" or "HELLO <name>"
             if text.startswith("HELLO"):
+                # Do NOT log HELLO; just learn the peer quietly
                 parts = text.split(maxsplit=1)
                 name = parts[1] if len(parts) > 1 else None
                 self._learn_peer(ip, name)
                 try:
                     sock.sendto(b"HUB-ACK", addr)
-                    self._log(f"[UDP]  -> Sent HUB-ACK to {ip}:{port}")
+                    # also do NOT log HUB-ACK for HELLO
                 except OSError as e:
-                    self._log(f"[UDP]  -> Failed to send HUB-ACK to {ip}: {e}")
+                    # only log if something goes wrong
+                    self._log(f"[UDP] HUB-ACK send failed to {ip}: {e}")
             else:
-                # normal message: just update last_seen
+                # Normal message: log + update last_seen
+                self._log(f"[UDP RX] from {ip}:{port} -> {text!r}")
                 self._learn_peer(ip)
 
         try:
@@ -423,6 +426,7 @@ class WifiHubTab(QtWidgets.QWidget):
         except Exception:
             pass
         self._log("[UDP] Listener stopped.")
+
 
     # ------------------------------------------------------------------
     # TCP listener (same logic)

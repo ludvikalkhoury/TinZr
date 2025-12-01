@@ -379,6 +379,10 @@ void TinZrHubCommands::handleNetMessage(IPAddress from, const uint8_t* data, siz
     if (!s.length()) return;
 
     if (s.equalsIgnoreCase("OFF")) {
+		_cmdSoftOff();   // soft power OFF
+	} else if (s.equalsIgnoreCase("ON")) {
+		_cmdSoftOn();    // soft power ON
+    } else if (s.equalsIgnoreCase("LED_OFF")) {
         _cmdOff();
     } else if (s.startsWith("LED ")) {
         _cmdLed(s);
@@ -392,6 +396,26 @@ void TinZrHubCommands::handleNetMessage(IPAddress from, const uint8_t* data, siz
         _cmdAnalog(s);
     }
 }
+
+
+void TinZrHubCommands::_cmdSoftOff() {
+	if (!_core) return;
+
+	// turn LED off for visual feedback (optional)
+	_core->ledOff();
+	_curR = _curG = _curB = _curBr = 0;
+
+	// put TinZr into soft-off (main loop will early-return)
+	_core->softOff();   // <-- if your API name is different, adjust here
+}
+
+void TinZrHubCommands::_cmdSoftOn() {
+	if (!_core) return;
+
+	// bring TinZr back to soft-on
+	_core->softOn();    // <-- adjust if your core uses another name, e.g. enable(), wake(), etc.
+}
+
 
 void TinZrHubCommands::_cmdOff() {
     if (!_core) return;

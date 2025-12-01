@@ -5,6 +5,7 @@ from PyQt5 import QtWidgets, QtGui
 
 from tab_wifi_hub import WifiHubTab
 from tab_ble_hub import BleHubTab
+from tab_commands import CommandsTab   
 
 # Use your shared visual style
 try:
@@ -25,7 +26,21 @@ class TinZrComCenterApp(QtWidgets.QMainWindow):
 
         self.setWindowTitle("TinZr Communication Center")
         self.setWindowIcon(QtGui.QIcon("TinZr_small_logo.ico"))
-        self.resize(2400, 800)
+
+        # ==== Lock physical window size: 5 in x 3 in ====
+        screen = QtWidgets.QApplication.primaryScreen()
+        dpi = screen.logicalDotsPerInch()  # or physicalDotsPerInch() if you want ruler-accurate
+
+        width_in = 8.5
+        height_in = 6.0
+        width_px = int(width_in * dpi)
+        height_px = int(height_in * dpi)
+
+        self.setFixedSize(width_px, height_px)
+        # (optional, but reinforces no resize)
+        self.setMinimumSize(width_px, height_px)
+        self.setMaximumSize(width_px, height_px)
+        # ================================================
 
         # shared mapping: list of dicts {hostname, port, ssid, battery}
         self.devices = []
@@ -41,14 +56,17 @@ class TinZrComCenterApp(QtWidgets.QMainWindow):
         # Create tabs (same logic: app=self so they can call back if needed)
         self.tab_wifi_hub = WifiHubTab(app=self)
         self.tab_ble_hub = BleHubTab(app=self)
+        self.tab_commands = CommandsTab(app=self)
 
         # Add tabs
         self.notebook.addTab(self.tab_wifi_hub, "WIFI Hub")
         self.notebook.addTab(self.tab_ble_hub, "BLE Hub")
+        self.notebook.addTab(self.tab_commands, "Commands")
 
         # Apply TinZr theme if available
         if apply_tinzr_theme is not None:
             apply_tinzr_theme(self)
+
 
     # Kept for compatibility with old API (even though DevicesTab is not used here)
     def set_devices(self, devices):
