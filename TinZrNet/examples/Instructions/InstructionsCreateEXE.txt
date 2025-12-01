@@ -1,0 +1,366 @@
+TinZr Viewer - Windows .EXE + Installer Guide
+================================================
+
+This file explains, step by step, how to:
+
+1. Turn your Python application into a single .exe using PyInstaller.
+2. Wrap that .exe into a Windows installer using Inno Setup.
+
+The instructions assume:
+- You are on Windows.
+- You have Python 3.x installed (e.g., 3.11).
+- Your main Python file is called: TinZrViewer.py
+  (If it has a different name, just substitute accordingly.)
+
+------------------------------------------------
+PART 0 – PREP: CHECK PYTHON & CREATE PROJECT FOLDER
+------------------------------------------------
+
+1) Check that Python is installed
+
+   Open Command Prompt (Win+R → type: cmd → Enter) and run:
+
+       python --version
+
+   or
+
+       py --version
+
+   You should see something like: Python 3.11.x
+
+   If not, install Python from python.org before continuing.
+
+
+2) Create a project folder
+
+   Choose or create a folder to hold your TinZr viewer code, for example:
+
+       C:\TinZrViewerProject\
+
+   Copy your Python files there, for example:
+
+       C:\TinZrViewerProject\TinZrViewer.py
+       (plus any other .py files, resources, etc.)
+
+
+----------------------------------------
+PART 1 – CREATE A VIRTUAL ENVIRONMENT
+----------------------------------------
+
+We’ll create an isolated environment with only the packages your app needs.
+
+1) In Command Prompt, go to your project folder:
+
+       cd C:\TinZrViewerProject
+
+2) Create a virtual environment called "venv":
+
+       python -m venv venv
+
+   This creates a folder:
+
+       C:\TinZrViewerProject\venv
+
+3) Activate the virtual environment:
+
+       venv\Scripts\activate
+
+   After activation, your prompt will start with (venv) like:
+
+       (venv) C:\TinZrViewerProject>
+
+
+-------------------------------------------
+PART 2 – INSTALL PYTHON DEPENDENCIES
+-------------------------------------------
+
+Install the libraries your app uses. For your BLE + GUI viewer, typical ones are:
+
+- PyQt5 (or PySide6)
+- pyqtgraph
+- bleak
+- numpy
+
+1) With the virtual environment still active, run:
+
+       pip install pyqt5 pyqtgraph bleak numpy
+
+   If your app uses more libraries (for example: scipy, matplotlib, etc.),
+   install them as well, e.g.:
+
+       pip install scipy matplotlib
+
+2) Test your application from the venv to make sure it runs:
+
+       python TinZrViewer.py
+
+   Confirm that:
+   - The GUI opens correctly.
+   - BLE scanning/connection works.
+   - Plots update as expected.
+
+   If there are errors, fix them here *before* building the .exe.
+
+
+-----------------------------------
+PART 3 – INSTALL PYINSTALLER
+-----------------------------------
+
+PyInstaller will convert your Python script into a standalone .exe.
+
+1) With venv still active, install PyInstaller:
+
+       pip install pyinstaller
+
+2) Verify:
+
+       pyinstaller --version
+
+   You should see a version number printed (for example, 6.x).
+
+
+----------------------------------------------
+PART 4 – BUILD A SINGLE .EXE WITH PYINSTALLER
+----------------------------------------------
+
+We’ll use the simplest useful command: one-file, no console window.
+
+1) Make sure you are in the project folder and venv is active:
+
+       (venv) C:\TinZrViewerProject>
+
+2) Run PyInstaller:
+
+       pyinstaller --noconsole --onefile --icon tinzr.ico TinZrViewer.py
+
+   Explanation:
+   - --onefile  → bundle everything into a single .exe
+   - --noconsole → don’t show a console window when the app starts
+
+3) After it finishes, PyInstaller creates some folders:
+
+   - C:\TinZrViewerProject\build\
+   - C:\TinZrViewerProject\dist\
+
+   Inside dist, you’ll find:
+
+       C:\TinZrViewerProject\dist\TinZrViewer.exe
+
+   This .exe is a portable copy of your app.
+
+
+4) Test the .exe
+
+   Still in Command Prompt (or in File Explorer):
+
+   - Run:
+         dist\TinZrViewer.exe
+
+   - Alternatively, double-click it from File Explorer.
+
+   Confirm it behaves the same as running the Python script.
+
+   If everything looks good, this is the .exe we will package
+   into a nice Windows installer.
+
+
+------------------------------------------------------
+PART 5 – PREPARE A RELEASE FOLDER FOR INNO SETUP
+------------------------------------------------------
+
+To keep things clean, create a dedicated folder that will contain
+the final .exe and any related resources.
+
+1) Create a folder, for example:
+
+       C:\TinZrViewerRelease\
+
+2) Copy the built .exe into this release folder:
+
+       From:
+         C:\TinZrViewerProject\dist\TinZrViewer.exe
+
+       To:
+         C:\TinZrViewerRelease\TinZrViewer.exe
+
+3) (Optional) Add an application icon
+
+   If you have an .ico file (for example, tinzr.ico), place it here:
+
+       C:\TinZrViewerRelease\tinzr.ico
+
+   This can be used both for your app shortcut and the installer icon.
+
+
+-----------------------------------------
+PART 6 – INSTALL INNO SETUP
+-----------------------------------------
+
+Inno Setup will create a standard Windows installer (Setup.exe).
+
+1) Download Inno Setup:
+
+   - Search on the web for: "Inno Setup Download".
+
+2) Install it:
+
+   - Run the installer and accept the defaults.
+   - After installation, you should have:
+       "Inno Setup Compiler" in your Start menu.
+
+
+-----------------------------------------------------
+PART 7 – CREATE AN INNO SETUP SCRIPT (.ISS FILE)
+-----------------------------------------------------
+
+We will create a simple script that tells Inno Setup:
+
+- Where to install the app (e.g., C:\Program Files\TinZr Viewer\).
+- Which files to copy.
+- How to create shortcuts.
+- What to call the installer.
+
+1) Open Inno Setup Compiler.
+
+2) Select:
+       File → New → "Create a new empty script file"
+   then click "OK".
+
+3) Paste the script below, then adjust the paths as needed:
+
+   NOTE: Make sure the paths match your system exactly.
+
+------------------------------------------------
+BEGIN SCRIPT TO PASTE INTO INNO SETUP COMPILER
+------------------------------------------------
+
+[Setup]
+AppId={{A1B2C3D4-E5F6-47A8-9B10-112233445566}
+AppName=TinZr Viewer
+AppVersion=1.0.0
+AppPublisher=Cognitive Signals Inc.
+AppPublisherURL=https://example.com
+AppSupportURL=https://example.com
+AppUpdatesURL=https://example.com
+DefaultDirName={pf}\TinZr Viewer
+DefaultGroupName=TinZr Viewer
+OutputBaseFilename=TinZrViewerSetup
+; Optional installer icon if you have one:
+; SetupIconFile=C:\TinZrViewerRelease\tinzr.ico
+Compression=lzma
+SolidCompression=yes
+DisableDirPage=no
+DisableProgramGroupPage=no
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Tasks]
+Name: "desktopicon"; Description: "Create a &desktop icon"; GroupDescription: "Additional icons:"; Flags: unchecked
+
+[Files]
+Source: "C:\TinZrViewerRelease\TinZrViewer.exe"; DestDir: "{app}"; Flags: ignoreversion
+; If you have extra files (e.g., an icon), you can also include:
+; Source: "C:\TinZrViewerRelease\tinzr.ico"; DestDir: "{app}"; Flags: ignoreversion
+
+[Icons]
+Name: "{group}\TinZr Viewer"; Filename: "{app}\TinZrViewer.exe"
+Name: "{commondesktop}\TinZr Viewer"; Filename: "{app}\TinZrViewer.exe"; Tasks: desktopicon
+
+[Run]
+Filename: "{app}\TinZrViewer.exe"; Description: "Launch TinZr Viewer"; Flags: nowait postinstall skipifsilent
+
+------------------------------------------------
+END SCRIPT
+------------------------------------------------
+
+4) Change the following parts if you want:
+
+   - AppName=TinZr Viewer
+     (This is the name shown to the user.)
+   - AppVersion=1.0.0
+     (Bump this for new releases.)
+   - AppPublisher=...
+     (Your name or company.)
+   - Source path to TinZrViewer.exe:
+       Source: "C:\TinZrViewerRelease\TinZrViewer.exe"
+
+     Make sure this exactly matches where you placed the .exe.
+
+   - SetupIconFile (optional line)
+     Uncomment and adjust if you have an .ico file.
+
+
+-------------------------------------
+PART 8 – BUILD THE INSTALLER
+-------------------------------------
+
+1) In Inno Setup Compiler, save the script:
+
+       File → Save As…
+       Example name: TinZrViewerInstaller.iss
+
+2) Compile it:
+
+   - Press F9
+   - Or go to: Build → Compile
+
+3) When it finishes successfully, you’ll see something like:
+
+       "Compilation successful"
+
+   and an output file in the same folder as the script, usually:
+
+       TinZrViewerSetup.exe
+
+
+-------------------------------------------
+PART 9 – TEST THE INSTALLER LIKE A USER
+-------------------------------------------
+
+1) Double-click:
+
+       TinZrViewerSetup.exe
+
+2) Go through the installer:
+
+   - Accept the defaults or choose a custom install directory.
+   - Decide if you want a desktop icon.
+
+3) After the install finishes, verify:
+
+   - In the Start Menu, under "TinZr Viewer", there is a shortcut.
+   - If you chose the desktop icon option, you see a shortcut on the desktop.
+   - When you run "TinZr Viewer", the app opens and behaves correctly:
+       - GUI shows up
+       - BLE scanning/connection works
+       - Plots update, etc.
+
+
+------------------------------------------
+PART 10 – RELEASING NEW VERSIONS
+------------------------------------------
+
+When you update the app in the future:
+
+1) Edit your Python code in C:\TinZrViewerProject\
+2) Rebuild the .exe with PyInstaller:
+
+       (Activate venv)
+       cd C:\TinZrViewerProject
+       venv\Scripts\activate
+       pyinstaller --noconsole --onefile --icon tinzr.ico TinZrViewer.py
+
+3) Copy the new .exe to the release folder:
+
+       Copy dist\TinZrViewer.exe → C:\TinZrViewerRelease\TinZrViewer.exe
+       (overwrite the old one)
+
+4) Update AppVersion in the Inno Setup script (optional but recommended):
+       AppVersion=1.1.0
+
+5) Rebuild the installer in Inno Setup (F9).
+
+6) Distribute the new TinZrViewerSetup.exe.
+
+You now have a complete workflow from Python source → .exe → installer.
