@@ -5,7 +5,7 @@
 TinZrNode Node;
 
 TinZrNodeConfig cfg = {
-  .hostname = "TinZrBLE0",
+  .hostname = "TinZrBLE2",
 
 };
 

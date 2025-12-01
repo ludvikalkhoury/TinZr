@@ -223,6 +223,8 @@ private:
   static TinZrHubCommands* _self;
 
   void _cmdOff();
+  void _cmdSoftOff();
+  void _cmdSoftOn();
   void _cmdLed(const String& s);
   void _cmdPing(IPAddress from);
   void _cmdBattery();
