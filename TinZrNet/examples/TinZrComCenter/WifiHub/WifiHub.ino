@@ -6,7 +6,7 @@ TinZrNode Node;
 TinZrNodeConfig cfg = {
   .ssid       = "Ludvik",
   .pass       = "Lud12345",
-  .hostname   = "TinZrWiFi1",  // or nullptr to reuse saved hostname
+  .hostname   = "TinZrWiFi2",  // or nullptr to reuse saved hostname
   .use_static = false,
   .hubTcpPort  = 4211,
   .hubUdpPort  = 4210,
