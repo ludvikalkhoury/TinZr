@@ -1,10 +1,13 @@
 #pragma once
 
-// =============================
-// TinZr global configuration
-// =============================
+// 1) Pull in user overrides if present
+#if defined(__has_include)
+#  if __has_include("TinZrUserConfig.h")
+#    include "TinZrUserConfig.h"
+#  endif
+#endif
 
-// Feature switches (can be overridden in the .ino before including TinZrNode.h)
+// 2) Defaults if not overridden
 #ifndef TINZR_ENABLE_WIFI
 #define TINZR_ENABLE_WIFI  1
 #endif
@@ -14,8 +17,10 @@
 #endif
 
 #ifndef TINZR_ENABLE_OTA
-#define TINZR_ENABLE_OTA   1   // requires TINZR_ENABLE_WIFI == 1
+#define TINZR_ENABLE_OTA   1  // requires TINZR_ENABLE_WIFI == 1
 #endif
+
+
 
 // You can also define PIN_RGB_LED / PB_PIN in the board variant or here if needed.
 // The code assumes:
