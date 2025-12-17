@@ -13,8 +13,8 @@
           "category": "Contributed",
           "url": "https://github.com/ludvikalkhoury/TinZr/releases/download/1.0.0/tinzr-esp32c3-rev4-1.0.0.zip",
           "archiveFileName": "tinzr-esp32c3-rev4-1.0.0.zip",
-          "checksum": "SHA-256:108FF99FAF269403D988F48B9339D4E578595713B8FAA0040C8B3DDFBDC4187E",
-          "size": "20598996",
+          "checksum": "SHA-256:40D91C6FC084415914EC7D84F3B74F90C3B0EC81F8BD7331ADC306D4BDD4B203",
+          "size": "20617190",
           "boards": [
             { "name": "TinZr ESP32-C3 Rev4" }
           ]
