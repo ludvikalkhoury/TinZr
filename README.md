@@ -5,7 +5,7 @@ It provides a clean, Boards-Manager-installable package so anyone can use your b
 
 ---
 ## Pinout
-![TinZr ESP32-C3 Pinout](https://github.com/ludvikalkhoury/TinZr/blob/main/docs/TinZr_Pinout.pdf?raw=true)
+![TinZr ESP32-C3 Pinout](https://github.com/ludvikalkhoury/TinZr/blob/main/docs/TinZr_Pinout.png?raw=true)
 
 
 
