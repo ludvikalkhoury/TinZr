@@ -20,10 +20,21 @@ Get-FileHash .\tinzr-esp32c3-rev4-1.0.0.zip -Algorithm SHA256
 
 
 
+# Release on GIT
+
+git tag -a 1.0.0 -m "TinZr ESP32-C3 Rev4 Arduino core v1.0.0"
+
+git push origin 1.0.0
+
+git push origin --tags
 
 
-
-
-
+#Create the GitHub Release (web UI)
+GitHub → Releases → New Release
+Select tag: 1.0.0
+Release title: descriptive + version
+Upload ZIP artifact
+Paste SHA-256 + notes
+Publish
 
 
