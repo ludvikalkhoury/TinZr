@@ -33,7 +33,7 @@ In Arduino IDE:
 ### 3️⃣ Select your board
 Go to:
 
-**Tools → Board → TinZr Boards → TinZr ESP32-C3**
+**Tools → Board → TinZr Boards → TinZr ESP32-C3 Rev4**
 
 ---
 
@@ -57,6 +57,7 @@ void loop() {
   strip.setPixelColor(0, strip.Color(0, 255, 0)); strip.show(); delay(500);
   strip.setPixelColor(0, strip.Color(0, 0, 255)); strip.show(); delay(500);
 }
+
 
 
 
