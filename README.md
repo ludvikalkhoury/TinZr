@@ -1,6 +1,6 @@
-# TinZr ESP32-C3 Arduino Boards Manager Package
+# TinZr ESP32-C3 Arduino Board Manager Package
 
-This repository contains the **TinZr ESP32-C3** custom board definition for the Arduino IDE.  
+This repository contains the **TinZr**, an ESP32-C3-based custom board definition for the Arduino IDE.  
 It provides a clean, Boards-Manager-installable package so anyone can use your board with one simple URL.
 
 ---
@@ -18,7 +18,7 @@ Open the Arduino IDE and go to:
 **File → Preferences → Additional Boards Manager URLs**, then paste:
 
 ```
-https://ludvikalkhoury.github.io/arduino-esp32-tinzr/package_tinzr_index.json
+https://ludvikalkhoury.github.io/tinzr/package_tinzr_index.json
 ```
 
 
@@ -27,13 +27,13 @@ Click **OK**.
 ### 2️⃣ Install the board package
 In Arduino IDE:
 - Go to **Tools → Board → Boards Manager**
-- Search for **TinZr ESP32 Boards**
+- Search for **TinZr Boards**
 - Click **Install**
 
 ### 3️⃣ Select your board
 Go to:
 
-**Tools → Board → TinZr ESP32 Boards → TinZr ESP32-C3 Custom Board**
+**Tools → Board → TinZr Boards → TinZr ESP32-C3**
 
 ---
 
@@ -57,6 +57,7 @@ void loop() {
   strip.setPixelColor(0, strip.Color(0, 255, 0)); strip.show(); delay(500);
   strip.setPixelColor(0, strip.Color(0, 0, 255)); strip.show(); delay(500);
 }
+
 
 
 
