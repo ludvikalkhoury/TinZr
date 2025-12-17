@@ -13,7 +13,7 @@ menu.EraseFlash=Erase All Flash Before Sketch Upload
 menu.ZigbeeMode=Zigbee Mode
 
 
-TinZr.name=TinZr ESP32-C3 Custom Board
+TinZr.name=TinZr ESP32-C3 Rev4
 
 TinZr.bootloader.tool=esptool_py
 TinZr.bootloader.tool.default=esptool_py
