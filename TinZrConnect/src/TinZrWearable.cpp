@@ -1,3 +1,6 @@
+// =============================================================
+// TinZrWearable.cpp  (FULL FILE)
+// =============================================================
 #include "TinZrWearable.h"
 #include <string.h>
 
@@ -56,14 +59,16 @@ static const uint8_t REG_CTRL3_C         = 0x12;
 // OUTX_L_G is usually 0x22 in LSM6 family
 static const uint8_t REG_OUTX_L_G        = 0x22;
 
-static void lsm6_write8(uint8_t reg, uint8_t val) {
+static void lsm6_write8(uint8_t reg, uint8_t val)
+{
 	Wire.beginTransmission(LSM6_ADDR);
 	Wire.write(reg);
 	Wire.write(val);
 	Wire.endTransmission();
 }
 
-static void lsm6_read_multi(uint8_t reg, uint8_t *buf, uint8_t len) {
+static void lsm6_read_multi(uint8_t reg, uint8_t *buf, uint8_t len)
+{
 	Wire.beginTransmission(LSM6_ADDR);
 	Wire.write(reg);
 	Wire.endTransmission(false);   // repeated start
@@ -73,19 +78,18 @@ static void lsm6_read_multi(uint8_t reg, uint8_t *buf, uint8_t len) {
 	}
 }
 
-// Configure LSM6 for ~416 Hz ODR accel/gyro, ±2g, ±125 dps
-static void lsm6_config() {
+// Configure LSM6 for ~416 Hz ODR accel/gyro, ±8g, ±1000 dps (as set below)
+static void lsm6_config()
+{
 	// CTRL3_C:
 	//   BDU = 1 (block data update)
 	//   IF_INC = 1 (auto-increment)
-	//   SW_RESET = 0
 	// Typical: 0b01000100 = 0x44
 	lsm6_write8(REG_CTRL3_C, 0x44);
 
 	// CTRL1_XL:
 	//   ODR_XL[3:0] = 0110 → 416 Hz
 	//   FS_XL[1:0]  = 11   → ±8 g
-	//   BW_XL[1:0]  = 00   → default bandwidth
 	// Bits: 0b0110 1100 = 0x6C
 	lsm6_write8(REG_CTRL1_XL, 0x6C);
 
@@ -95,7 +99,6 @@ static void lsm6_config() {
 	//  Bits: 0b0110 1000 = 0x68
 	lsm6_write8(REG_CTRL2_G, 0x68);
 }
-
 
 // Burst-read raw gyro + accel in one shot.
 // Order (12 bytes):
@@ -129,14 +132,16 @@ static const uint8_t REG_LED2_PA         = 0x0D;  // IR LED current
 static const uint8_t REG_MULTI_LED_CTRL1 = 0x11;
 static const uint8_t REG_MULTI_LED_CTRL2 = 0x12;
 
-static void max_write8(uint8_t reg, uint8_t val) {
+static void max_write8(uint8_t reg, uint8_t val)
+{
 	Wire.beginTransmission(MAX30102_ADDR);
 	Wire.write(reg);
 	Wire.write(val);
 	Wire.endTransmission();
 }
 
-static void max_read_multi(uint8_t reg, uint8_t *buf, uint8_t len) {
+static void max_read_multi(uint8_t reg, uint8_t *buf, uint8_t len)
+{
 	Wire.beginTransmission(MAX30102_ADDR);
 	Wire.write(reg);
 	Wire.endTransmission(false);
@@ -147,7 +152,8 @@ static void max_read_multi(uint8_t reg, uint8_t *buf, uint8_t len) {
 }
 
 // Configure MAX30102 for 400 sps, 2-LED mode (RED + IR), FIFO mode
-static void max30102_config() {
+static void max30102_config()
+{
 	// Use SparkFun driver for initial config (one-time; acceptable overhead)
 	// It sets FIFO, SPO2, LED currents, etc.
 	const byte powerLevel     = 0x3F;   // ~mid LED current
@@ -175,11 +181,12 @@ static const uint8_t FRAMES_PER_PACKET = 9;
 
 // Scaling factors (match Python viewer)
 static constexpr float ACC_SCALE = 1000.0f;  // accel: m/s^2 → milli-units
-static constexpr float GYR_SCALE = 100.0f;   // gyro:  rad/s or dps → centi-units
-static constexpr float G_SENS_DPS_PER_LSB = 35e-3f;    // 35 mdps/LSB for ±1000 dps
+static constexpr float GYR_SCALE = 100.0f;   // gyro:  dps → centi-units
+static constexpr float G_SENS_DPS_PER_LSB = 35e-3f; // 35 mdps/LSB for ±1000 dps
 
 // --- HR / SpO2 + battery in frame ---
-struct __attribute__((packed)) WearFrame {
+struct __attribute__((packed)) WearFrame
+{
 	int16_t  ax, ay, az;   // accel * ACC_SCALE
 	int16_t  gx, gy, gz;   // gyro  * GYR_SCALE
 	uint32_t red;          // raw PPG red
@@ -210,7 +217,6 @@ static const unsigned long BATT_PERIOD_MS = 5UL * 60UL * 1000UL; // 5 minutes
 static uint16_t read_battery_pct()
 {
 	float pct = TinZr.batteryPercent();   // TinZrCore API
-
 	if (pct < 0.0f)   pct = 0.0f;
 	if (pct > 100.0f) pct = 100.0f;
 
@@ -231,8 +237,8 @@ static void update_hr_spo2_from_ppg(uint32_t red, uint32_t ir)
 	const int N_SAMPLES = BUFFER_SIZE;
 	static uint32_t ir_buf[N_SAMPLES];
 	static uint32_t red_buf[N_SAMPLES];
-	static int idx25          = 0;
-	static int decim_counter  = 0;
+	static int idx25         = 0;
+	static int decim_counter = 0;
 
 	// ---- 1) Decimate 250 Hz → 25 Hz ----
 	decim_counter++;
@@ -242,8 +248,8 @@ static void update_hr_spo2_from_ppg(uint32_t red, uint32_t ir)
 
 	// ---- 2) If no finger → just reset algorithm state ----
 	if (ir < IR_THRESHOLD) {
-		idx25   = 0;  // restart streaming for algorithm
-		sLastHr = 0;
+		idx25     = 0;  // restart streaming for algorithm
+		sLastHr   = 0;
 		sLastSpo2 = 0;
 		return;
 	}
@@ -280,14 +286,13 @@ static void update_hr_spo2_from_ppg(uint32_t red, uint32_t ir)
 		sLastSpo2 = spo2;
 }
 
-
 // ---------------- TinZrWearable ------------------
-
 TinZrWearable::TinZrWearable()
 {
 }
 
-void TinZrWearable::begin(const TinZrWearableConfig& cfg) {
+void TinZrWearable::begin(const TinZrWearableConfig& cfg)
+{
 	_cfg = cfg;
 
 	Serial.begin(115200);
@@ -341,21 +346,27 @@ void TinZrWearable::begin(const TinZrWearableConfig& cfg) {
 	Wire.setClock(400000);   // 400 kHz I2C
 
 	// Use Adafruit begin ONLY to confirm presence; then do our own config.
-	bool imu_ok = sImu.begin_I2C(0x6A, &Wire);
-	if (imu_ok) {
+	_imuReady = sImu.begin_I2C(0x6A, &Wire);
+	if (_imuReady) {
 		lsm6_config();
 	}
 
-	bool ppg_ok = sPpg.begin(Wire, I2C_SPEED_FAST);
-	if (ppg_ok) {
+	_ppgReady = sPpg.begin(Wire, I2C_SPEED_FAST);
+	if (_ppgReady) {
 		max30102_config();
 	}
 
-	_sensorsReady = imu_ok && ppg_ok;
-	if (_sensorsReady) {
-		Serial.println("✅ Sensors ready");
+	// IMU required, PPG optional
+	_sensorsReady = _imuReady;
+
+	if (_imuReady) {
+		if (_ppgReady) {
+			Serial.println("✅ Sensors ready (IMU + PPG)");
+		} else {
+			Serial.println("⚠️ PPG NOT found → will stream IMU, send PPG zeros");
+		}
 	} else {
-		Serial.println("⚠️ Sensors NOT ready");
+		Serial.println("❌ IMU NOT found → cannot stream");
 	}
 
 	// No SD in this build
@@ -380,7 +391,8 @@ void TinZrWearable::begin(const TinZrWearableConfig& cfg) {
 	Serial.println("  • Python HUB gates viewing with Start/Stop Data.");
 }
 
-void TinZrWearable::handle() {
+void TinZrWearable::handle()
+{
 	// Soft power
 	TinZr.handle();
 	_statusLED.handle();
@@ -395,7 +407,8 @@ void TinZrWearable::handle() {
 }
 
 // ===================== BLE ======================
-void TinZrWearable::_handleBLE() {
+void TinZrWearable::_handleBLE()
+{
 #if TINZR_ENABLE_BLE
 	if (!_bleStarted) return;
 
@@ -458,12 +471,14 @@ void TinZrWearable::_handleBleCommand(const uint8_t* data, size_t len)
 }
 
 // ================= STREAM TOGGLE ================
-void TinZrWearable::_applyStreamingChange(bool enable) {
+void TinZrWearable::_applyStreamingChange(bool enable)
+{
 	if (enable == _streaming) return;
 
 	if (enable) {
-		if (!_sensorsReady) {
-			Serial.println("❌ Cannot start streaming: sensors not ready");
+		// IMU required for streaming; PPG optional
+		if (!_imuReady) {
+			Serial.println("❌ Cannot start streaming: IMU not ready");
 			_setErrorLED();
 			return;
 		}
@@ -485,7 +500,8 @@ void TinZrWearable::_applyStreamingChange(bool enable) {
 }
 
 // ================== STREAMING ===================
-void TinZrWearable::_handleStreaming() {
+void TinZrWearable::_handleStreaming()
+{
 	if (!_streaming) return;
 
 	unsigned long now = millis();
@@ -512,40 +528,44 @@ void TinZrWearable::_handleStreaming() {
 	int16_t ax_raw, ay_raw, az_raw;
 	lsm6_read_raw(gx_raw, gy_raw, gz_raw, ax_raw, ay_raw, az_raw);
 
-	// ---------- Read PPG via FIFO ----------
+	// ---------- Read PPG via FIFO (or send zeros if PPG missing) ----------
 	static uint32_t last_red = 0;
 	static uint32_t last_ir  = 0;
 
-	uint32_t red_raw, ir_raw;
-	if (!ppg_read_fast(red_raw, ir_raw)) {
-		// No new sample this loop: reuse last one
-		red_raw = last_red;
-		ir_raw  = last_ir;
+	uint32_t red_raw = 0;
+	uint32_t ir_raw  = 0;
+
+	if (_ppgReady) {
+		if (!ppg_read_fast(red_raw, ir_raw)) {
+			// No new sample this loop: reuse last one
+			red_raw = last_red;
+			ir_raw  = last_ir;
+		} else {
+			last_red = red_raw;
+			last_ir  = ir_raw;
+		}
+
+		// Feed every sample into HR / SpO2 estimator
+		update_hr_spo2_from_ppg(red_raw, ir_raw);
+
+		// Only print every 5 seconds for debugging (only if PPG exists)
+		if (sLastHrSpo2UpdateMs == 0 ||
+			(now - sLastHrSpo2UpdateMs) >= HR_SPO2_UPDATE_INTERVAL_MS)
+		{
+			sLastHrSpo2UpdateMs = now;
+
+			Serial.print("💓 HR update: ");
+			Serial.print(sLastHr);
+			Serial.print(" bpm, SpO2: ");
+			Serial.print(sLastSpo2);
+			Serial.println(" %");
+		}
 	} else {
-		last_red = red_raw;
-		last_ir  = ir_raw;
-	}
-
-	// Optional: gate on finger presence
-	// if (ir_raw < IR_THRESHOLD) {
-	//     red_raw = 0;
-	//     ir_raw  = 0;
-	// }
-
-	// ---------- Feed every sample into HR / SpO2 estimator ----------
-	update_hr_spo2_from_ppg(red_raw, ir_raw);
-
-	// Only print every 5 seconds for debugging
-	if (sLastHrSpo2UpdateMs == 0 ||
-		(now - sLastHrSpo2UpdateMs) >= HR_SPO2_UPDATE_INTERVAL_MS)
-	{
-		sLastHrSpo2UpdateMs = now;
-
-		Serial.print("💓 HR update: ");
-		Serial.print(sLastHr);
-		Serial.print(" bpm, SpO2: ");
-		Serial.print(sLastSpo2);
-		Serial.println(" %");
+		// Hard zeros if sensor not present
+		red_raw   = 0;
+		ir_raw    = 0;
+		sLastHr   = 0;
+		sLastSpo2 = 0;
 	}
 
 	// ---------- Battery refresh (every 5 min or forced) ----------
@@ -559,21 +579,22 @@ void TinZrWearable::_handleStreaming() {
 	// ---------- Pack into binary frame ----------
 	WearFrame &f = sFrameBuf[sFrameCount];
 
-	// accel raw → scaled
+	// accel raw → scaled (LSB scaling here is your original assumption)
 	f.ax = (int16_t)((float)ax_raw * (ACC_SCALE / 4096.0f));
 	f.ay = (int16_t)((float)ay_raw * (ACC_SCALE / 4096.0f));
 	f.az = (int16_t)((float)az_raw * (ACC_SCALE / 4096.0f));
-	
-	f.gx = (int16_t)( gx_raw * (GYR_SCALE * G_SENS_DPS_PER_LSB) ); // = raw * 0.875
-	f.gy = (int16_t)( gy_raw * (GYR_SCALE * G_SENS_DPS_PER_LSB) );
-	f.gz = (int16_t)( gz_raw * (GYR_SCALE * G_SENS_DPS_PER_LSB) );
-	
 
+	// gyro raw → scaled (raw * 0.875 per your original comment)
+	f.gx = (int16_t)(gx_raw * (GYR_SCALE * G_SENS_DPS_PER_LSB));
+	f.gy = (int16_t)(gy_raw * (GYR_SCALE * G_SENS_DPS_PER_LSB));
+	f.gz = (int16_t)(gz_raw * (GYR_SCALE * G_SENS_DPS_PER_LSB));
+
+	// PPG + derived values (zeros if _ppgReady is false)
 	f.red      = red_raw;
 	f.ir       = ir_raw;
-	f.hr_bpm   = sLastHr;      // updated every ~5 s
-	f.spo2_pct = sLastSpo2;    // updated every ~5 s
-	f.batt_pct = sLastBattPct; // updated every ~5 min or on BAT command
+	f.hr_bpm   = (uint8_t)sLastHr;
+	f.spo2_pct = (uint8_t)sLastSpo2;
+	f.batt_pct = (uint8_t)sLastBattPct;
 
 	sFrameCount++;
 
@@ -581,16 +602,15 @@ void TinZrWearable::_handleStreaming() {
 	// ---------- When we have FRAMES_PER_PACKET, send one binary packet ----------
 	if (sFrameCount >= FRAMES_PER_PACKET) {
 		const size_t payloadSize = sizeof(WearFrame) * FRAMES_PER_PACKET;
-
 		_ble.sendTCP(reinterpret_cast<const uint8_t*>(sFrameBuf), payloadSize);
-
 		sFrameCount = 0;
 	}
 #endif
 }
 
 // ===================== LED ======================
-void TinZrWearable::_updateLED() {
+void TinZrWearable::_updateLED()
+{
 #if TINZR_ENABLE_BLE
 	if (!_bleStarted) {
 		_statusLED.setMode(TinZrStatusLED::Mode::WIFI_FAIL);
@@ -610,6 +630,7 @@ void TinZrWearable::_updateLED() {
 #endif
 }
 
-void TinZrWearable::_setErrorLED() {
+void TinZrWearable::_setErrorLED()
+{
 	_statusLED.setMode(TinZrStatusLED::Mode::WIFI_FAIL);
 }
