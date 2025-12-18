@@ -30,7 +30,7 @@ public:
 
 private:
 	TinZrWearableConfig _cfg{};
-	
+
 	// Status LED (same style as TinZrNode)
 	TinZrStatusLED    _statusLED;
 
@@ -42,17 +42,22 @@ private:
 
 	// State
 	TinZrWearMode     _mode           = TinZrWearMode::BLE_ONLY;
-	bool              _sensorsReady   = false;
+
+	// IMU required; PPG optional
+	bool              _sensorsReady   = false;  // kept for compatibility (== _imuReady)
+	bool              _imuReady       = false;  // IMU present/configured
+	bool              _ppgReady       = false;  // PPG present/configured (optional)
+
 	bool              _streaming      = false;
 	unsigned long     _lastSampleMs   = 0;
-	bool              _wasSoftOn      = false;    
+	bool              _wasSoftOn      = false;
 
 	// Internal handlers
 	static TinZrWearable* _self;
-    static void _bleCallbackStatic(IPAddress from,
-                                   const uint8_t* data,
-                                   size_t len);
-    void _handleBleCommand(const uint8_t* data, size_t len);
+	static void _bleCallbackStatic(IPAddress from,
+	                               const uint8_t* data,
+	                               size_t len);
+	void _handleBleCommand(const uint8_t* data, size_t len);
 
 	void _handleBLE();
 	void _handleStreaming();
