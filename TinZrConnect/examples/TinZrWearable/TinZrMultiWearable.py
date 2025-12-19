@@ -140,7 +140,7 @@ class TinZrDeviceRow(QtWidgets.QFrame):
 		""")
 
 		self.btn_remove = QtWidgets.QPushButton("✕")
-		self.btn_remove.setFixedWidth(34)
+		self.btn_remove.setFixedWidth(50)
 		self.btn_remove.clicked.connect(lambda: self.request_remove.emit(self.device_id))
 		self.btn_remove.setToolTip("Remove device from list")
 
