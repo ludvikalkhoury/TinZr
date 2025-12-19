@@ -467,6 +467,10 @@ void TinZrWearable::_handleBleCommand(const uint8_t* data, size_t len)
 	} else if (s.equalsIgnoreCase("BAT")) {
 		Serial.println("→ BATTERY refresh requested");
 		forceBatteryUpdate();   // sets sLastBattSampleMs = 0 so next tick re-reads battery
+	} else if (s.equalsIgnoreCase("T")) {
+		Serial.println("→ TEST: LED blue flash x5");
+		_statusLED.flashColor(0, 0, 255, 50, 5, 120, 120);
+		_statusLED.refresh();
 	}
 }
 

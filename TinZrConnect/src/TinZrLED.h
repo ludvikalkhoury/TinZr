@@ -34,7 +34,10 @@ public:
         uint16_t off_ms = 120
     );
     
+    void setColor(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness);
+    void refresh();
 
+    
 private:
 #ifdef PIN_RGB_LED
     Mode     _mode       = Mode::OFF;
