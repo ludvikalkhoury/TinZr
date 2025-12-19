@@ -121,6 +121,32 @@ void TinZrStatusLED::_wheel(uint8_t pos, uint8_t& r, uint8_t& g, uint8_t& b) {
 
 
 
+// ================= NEW: set solid color helper =================
+void TinZrStatusLED::setColor(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness)
+{
+#ifdef PIN_RGB_LED
+	_brightness = brightness;
+	_setRGB(r, g, b);
+#else
+	(void)r; (void)g; (void)b;
+	(void)brightness;
+#endif
+}
+
+
+void TinZrStatusLED::refresh()
+{
+#ifdef PIN_RGB_LED
+	// Re-apply the current mode without changing it
+	Mode m = _mode;
+
+	// Temporarily bypass the early-return by forcing a mode change
+	_mode = Mode::OFF;
+	setMode(m);
+#endif
+}
+
+
 // ================= NEW: blocking flash helper =================
 void TinZrStatusLED::flashColor(
     uint8_t  r,
