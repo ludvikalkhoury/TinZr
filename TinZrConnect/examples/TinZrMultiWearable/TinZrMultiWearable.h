@@ -7,29 +7,29 @@
 #include "TinZrConnections.h"   // TinZrBleConnect
 #include "TinZrLED.h"           // TinZrStatusLED
 
-struct TinZrWearableConfig {
-	const char* hostname           = "TinZrWearable";
+struct TinZrMultiWearableConfig {
+	const char* hostname           = "TinZrMultiWearable";
 	// Sampling interval in ms (4 ms ≈ 250 Hz target, resampled to 240 Hz on hub)
 	uint16_t    sample_interval_ms = 4;
 };
 
 // We keep enum for future flexibility, but effectively use BLE_ONLY.
-enum class TinZrWearMode : uint8_t {
+enum class TinZrMultiWearMode : uint8_t {
 	BLE_ONLY = 0,
 	SD_ONLY,
 	BLE_AND_SD,
 	NUM_MODES
 };
 
-class TinZrWearable {
+class TinZrMultiWearable {
 public:
-	TinZrWearable();
-	void begin(const TinZrWearableConfig& cfg);
+	TinZrMultiWearable();
+	void begin(const TinZrMultiWearableConfig& cfg);
 	void handle();
 	void forceBatteryUpdate();
 
 private:
-	TinZrWearableConfig _cfg{};
+	TinZrMultiWearableConfig _cfg{};
 
 	// Status LED (same style as TinZrNode)
 	TinZrStatusLED    _statusLED;
@@ -41,7 +41,7 @@ private:
 #endif
 
 	// State
-	TinZrWearMode     _mode           = TinZrWearMode::BLE_ONLY;
+	TinZrMultiWearMode _mode           = TinZrMultiWearMode::BLE_ONLY;
 
 	// IMU required; PPG optional
 	bool              _sensorsReady   = false;  // kept for compatibility (== _imuReady)
@@ -53,10 +53,12 @@ private:
 	bool              _wasSoftOn      = false;
 
 	// Internal handlers
-	static TinZrWearable* _self;
-	static void _bleCallbackStatic(IPAddress from,
-	                               const uint8_t* data,
-	                               size_t len);
+	static TinZrMultiWearable* _self;
+	static void _bleCallbackStatic(
+		IPAddress from,
+		const uint8_t* data,
+		size_t len
+	);
 	void _handleBleCommand(const uint8_t* data, size_t len);
 
 	void _handleBLE();

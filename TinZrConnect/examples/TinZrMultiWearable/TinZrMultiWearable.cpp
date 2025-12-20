@@ -1,5 +1,5 @@
 // =============================================================
-// TinZrWearable.cpp  (FULL FILE)
+// TinZrMultiWearable.cpp  (FULL FILE)
 // =============================================================
 #include "TinZrMultiWearable.h"
 #include <string.h>
@@ -19,7 +19,7 @@ static Adafruit_LSM6DS3TRC sImu;
 static MAX30105            sPpg;
 
 // Static self pointer for BLE callback trampoline
-TinZrWearable* TinZrWearable::_self = nullptr;
+TinZrMultiWearable* TinZrMultiWearable::_self = nullptr;
 
 // Non-blocking PPG reader using SparkFun's internal ring buffer.
 // This mimics getRed()/getIR() but without safeCheck() blocking.
@@ -224,7 +224,7 @@ static uint16_t read_battery_pct()
 }
 
 // OPTIONAL: call this from any "battery query" command handler you already have
-void TinZrWearable::forceBatteryUpdate()
+void TinZrMultiWearable::forceBatteryUpdate()
 {
 	// force a refresh on the next _handleStreaming() tick
 	sLastBattSampleMs = 0;
@@ -286,12 +286,12 @@ static void update_hr_spo2_from_ppg(uint32_t red, uint32_t ir)
 		sLastSpo2 = spo2;
 }
 
-// ---------------- TinZrWearable ------------------
-TinZrWearable::TinZrWearable()
+// ---------------- TinZrMultiWearable ------------------
+TinZrMultiWearable::TinZrMultiWearable()
 {
 }
 
-void TinZrWearable::begin(const TinZrWearableConfig& cfg)
+void TinZrMultiWearable::begin(const TinZrMultiWearableConfig& cfg)
 {
 	_cfg = cfg;
 
@@ -299,7 +299,7 @@ void TinZrWearable::begin(const TinZrWearableConfig& cfg)
 	delay(200);
 
 	Serial.println();
-	Serial.println("===== TinZrWearable (BLE only, NO SD, raw I2C) =====");
+	Serial.println("===== TinZrMultiWearable (BLE only, NO SD, raw I2C) =====");
 
 	// Core (soft power etc.)
 	TinZr.begin();
@@ -315,7 +315,7 @@ void TinZrWearable::begin(const TinZrWearableConfig& cfg)
 		const char* name =
 			(_cfg.hostname && _cfg.hostname[0] != '\0')
 				? _cfg.hostname
-				: "TinZrWearable";
+				: "TinZrMultiWearable";
 
 		Serial.print("BLE name: ");
 		Serial.println(name);
@@ -323,14 +323,14 @@ void TinZrWearable::begin(const TinZrWearableConfig& cfg)
 		_ble.setName(name);
 		_bleStarted = _ble.start();
 		if (!_bleStarted) {
-			Serial.println("❌ TinZrWearable: BLE start failed");
+			Serial.println("❌ TinZrMultiWearable: BLE start failed");
 			_statusLED.setMode(TinZrStatusLED::Mode::WIFI_FAIL);
 		} else {
 			Serial.println("🔵 BLE started (advertising)");
 
 			// Register BLE message callback (S / E / BAT)
 			_self = this;
-			_ble.onMessage(&TinZrWearable::_bleCallbackStatic);
+			_ble.onMessage(&TinZrMultiWearable::_bleCallbackStatic);
 
 			_bleWasConnected = _ble.isConnected();
 			_statusLED.setMode(TinZrStatusLED::Mode::BLE_ADVERTISING);
@@ -373,7 +373,7 @@ void TinZrWearable::begin(const TinZrWearableConfig& cfg)
 	Serial.println("💾 SD logging: DISABLED (fully removed)");
 
 	// Default mode and streaming
-	_mode         = TinZrWearMode::BLE_ONLY;  // only BLE is effective
+	_mode         = TinZrMultiWearMode::BLE_ONLY;  // only BLE is effective
 	_streaming    = false;
 	_lastSampleMs = 0;
 
@@ -391,7 +391,7 @@ void TinZrWearable::begin(const TinZrWearableConfig& cfg)
 	Serial.println("  • Python HUB gates viewing with Start/Stop Data.");
 }
 
-void TinZrWearable::handle()
+void TinZrMultiWearable::handle()
 {
 	// Soft power
 	TinZr.handle();
@@ -407,7 +407,7 @@ void TinZrWearable::handle()
 }
 
 // ===================== BLE ======================
-void TinZrWearable::_handleBLE()
+void TinZrMultiWearable::_handleBLE()
 {
 #if TINZR_ENABLE_BLE
 	if (!_bleStarted) return;
@@ -435,7 +435,7 @@ void TinZrWearable::_handleBLE()
 }
 
 // ========== BLE command callback (S / E / BAT) ==========
-void TinZrWearable::_bleCallbackStatic(IPAddress from,
+void TinZrMultiWearable::_bleCallbackStatic(IPAddress from,
                                        const uint8_t* data,
                                        size_t len)
 {
@@ -444,7 +444,7 @@ void TinZrWearable::_bleCallbackStatic(IPAddress from,
 	_self->_handleBleCommand(data, len);
 }
 
-void TinZrWearable::_handleBleCommand(const uint8_t* data, size_t len)
+void TinZrMultiWearable::_handleBleCommand(const uint8_t* data, size_t len)
 {
 	// Commands are tiny ASCII strings: "S", "E", "BAT"
 	String s;
@@ -475,7 +475,7 @@ void TinZrWearable::_handleBleCommand(const uint8_t* data, size_t len)
 }
 
 // ================= STREAM TOGGLE ================
-void TinZrWearable::_applyStreamingChange(bool enable)
+void TinZrMultiWearable::_applyStreamingChange(bool enable)
 {
 	if (enable == _streaming) return;
 
@@ -504,7 +504,7 @@ void TinZrWearable::_applyStreamingChange(bool enable)
 }
 
 // ================== STREAMING ===================
-void TinZrWearable::_handleStreaming()
+void TinZrMultiWearable::_handleStreaming()
 {
 	if (!_streaming) return;
 
@@ -518,9 +518,9 @@ void TinZrWearable::_handleStreaming()
 	need_ble =
 		_bleStarted &&
 		_ble.isConnected() &&
-		(_mode == TinZrWearMode::BLE_ONLY ||
-		 _mode == TinZrWearMode::BLE_AND_SD ||
-		 _mode == TinZrWearMode::SD_ONLY);
+		(_mode == TinZrMultiWearMode::BLE_ONLY ||
+		 _mode == TinZrMultiWearMode::BLE_AND_SD ||
+		 _mode == TinZrMultiWearMode::SD_ONLY);
 #endif
 
 	if (!need_ble) {
@@ -613,7 +613,7 @@ void TinZrWearable::_handleStreaming()
 }
 
 // ===================== LED ======================
-void TinZrWearable::_updateLED()
+void TinZrMultiWearable::_updateLED()
 {
 #if TINZR_ENABLE_BLE
 	if (!_bleStarted) {
@@ -634,7 +634,7 @@ void TinZrWearable::_updateLED()
 #endif
 }
 
-void TinZrWearable::_setErrorLED()
+void TinZrMultiWearable::_setErrorLED()
 {
 	_statusLED.setMode(TinZrStatusLED::Mode::WIFI_FAIL);
 }

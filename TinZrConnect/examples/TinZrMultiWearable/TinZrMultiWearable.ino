@@ -1,9 +1,9 @@
 #include <Arduino.h>
 #include "TinZrMultiWearable.h"
 
-TinZrWearable Wearable;
+TinZrMultiWearable Wearable;
 
-TinZrWearableConfig cfg = {
+TinZrMultiWearableConfig cfg = {
 	.hostname           = "TinZrBlue",
 	.sample_interval_ms = 4    // ≈ 250 Hz target
 };
