@@ -9,7 +9,7 @@
 
 // 2) Defaults if not overridden
 #ifndef TINZR_ENABLE_WIFI
-#define TINZR_ENABLE_WIFI  1
+#define TINZR_ENABLE_WIFI  0
 #endif
 
 #ifndef TINZR_ENABLE_BLE
@@ -17,7 +17,7 @@
 #endif
 
 #ifndef TINZR_ENABLE_OTA
-#define TINZR_ENABLE_OTA   1  // requires TINZR_ENABLE_WIFI == 1
+#define TINZR_ENABLE_OTA   0  // requires TINZR_ENABLE_WIFI == 1
 #endif
 
 
