@@ -69,7 +69,7 @@ ACC_SCALE = 1e-3         # milli-units -> m/s^2  (firmware sends accel * 1000)
 GYR_SCALE = 1.0 / 100.0  # centi-units -> dps-ish or rad/s-ish
 
 # ================== Viewer Config ==================
-FS_RESAMP_HZ    = 240.0   # desired *fixed* output Fs (plot + save)
+FS_RESAMP_HZ    = 220.0   # desired *fixed* output Fs (plot + save)
 WINDOW_SEC      = 3.0     # seconds visible on screen
 UPDATE_MS       = 10      # GUI update period in ms
 MAX_RAW_SAMPLES = 20000   # safety cap on *plotting* raw buffer size
@@ -297,11 +297,11 @@ class WearableViewer(QtWidgets.QWidget):
         self.record_file = None
         self.record_path = None
 
-        # ===== Recording buffers (for 240 Hz resampling on stop) =====
+        # ===== Recording buffers (for FS_RESAMP_HZ Hz resampling on stop) =====
         self.rec_idx_raw = []
         self.rec_data_raw = {k: [] for k in self.rec_keys}
 
-        self.record_fs = FS_RESAMP_HZ  # forced output Fs (240 Hz)
+        self.record_fs = FS_RESAMP_HZ  # forced output Fs (FS_RESAMP_HZ Hz)
 
         # BLE stuff
         self.loop = asyncio.new_event_loop()
@@ -334,7 +334,7 @@ class WearableViewer(QtWidgets.QWidget):
                 border-radius: 6px;
             }
         """)
-        self.lbl_hr_spo2.setText("HR: -- bpm   SpO₂: -- %")
+        self.lbl_hr_spo2.setText(f"HR: -- bpm   SpO₂: -- %   Raw Fs: -- Hz   Fixed Fs: {FS_RESAMP_HZ:.1f} Hz")
 
         # transparent to mouse, doesn't block interaction
         self.lbl_hr_spo2.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
@@ -378,7 +378,17 @@ class WearableViewer(QtWidgets.QWidget):
         else:
             spo2_text = "SpO₂: -- %"
 
-        self.lbl_hr_spo2.setText(f"{hr_text}   {spo2_text}")
+        # ---- Raw Fs (incoming) ----
+        if self.fs_est is not None and self.fs_est > 0:
+            raw_fs_text = f"Raw Fs: {self.fs_est:.1f} Hz"
+        else:
+            raw_fs_text = "Raw Fs: -- Hz"
+
+        # ---- Fixed Fs (display/save grid) ----
+        fixed_fs = getattr(self, "record_fs", FS_RESAMP_HZ)
+        fixed_fs_text = f"Fixed Fs: {float(fixed_fs):.1f} Hz"
+
+        self.lbl_hr_spo2.setText(f"{hr_text}   {spo2_text}   {raw_fs_text}   {fixed_fs_text}")
         self.lbl_hr_spo2.adjustSize()
         self._position_hr_hud()
 
@@ -706,7 +716,7 @@ class WearableViewer(QtWidgets.QWidget):
         fname, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Save Recording",
-            "tinzr_recording_240Hz.csv",   # hint in name that this will be resampled
+            "tinzr_recording_"+FS_RESAMP_HZ+"Hz.csv",   # hint in name that this will be resampled
             "CSV Files (*.csv);;All Files (*)",
         )
         if not fname:
@@ -761,9 +771,9 @@ class WearableViewer(QtWidgets.QWidget):
             self.set_status("Recording stopped (no samples)")
             return
 
-        # ===== Resample to 240 Hz and write =====
+        # ===== Resample to FS_RESAMP_HZ Hz and write =====
         try:
-            # Use estimated original Fs if available, else fall back to 240 Hz
+            # Use estimated original Fs if available, else fall back to FS_RESAMP_HZ Hz
             fs_orig = self.fs_est if (self.fs_est is not None and self.fs_est > 0) else self.record_fs
 
             idx = np.asarray(self.rec_idx_raw, dtype=float)
@@ -771,7 +781,7 @@ class WearableViewer(QtWidgets.QWidget):
             t_raw = (idx - idx[0]) / fs_orig  # start at 0
             t_end = t_raw[-1]
 
-            # 240 Hz grid from 0 to t_end
+            # FS_RESAMP_HZ Hz grid from 0 to t_end
             dt_out = 1.0 / self.record_fs
             n_out = int(t_end * self.record_fs)
             if n_out < 1:
@@ -798,7 +808,7 @@ class WearableViewer(QtWidgets.QWidget):
                     data_out[key] = np.interp(t_ds, t_raw, vals)
 
             # ---- Write metadata ----
-            f.write("# TinZr Wearable Recording (resampled to fixed 240 Hz)\n")
+            f.write("# TinZr Wearable Recording (resampled to fixed "+FS_RESAMP_HZ+" Hz)\n")
             f.write(f"# DateTime: {datetime.now().isoformat()}\n")
             f.write(f"# Fs_orig_Hz: {fs_orig:.6f}\n")
             f.write(f"# Fs_out_Hz: {self.record_fs:.6f}\n")
