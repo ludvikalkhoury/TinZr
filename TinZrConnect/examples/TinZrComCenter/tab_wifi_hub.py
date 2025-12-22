@@ -8,6 +8,81 @@ import time
 
 from PyQt5 import QtCore, QtWidgets
 
+
+# =========================
+# DPU framing (TinZr WiFi)
+# =========================
+_DPU_MAGIC0 = ord('T')
+_DPU_MAGIC1 = ord('Z')
+_DPU_VER    = 1
+_DPU_FLAG_CRC32 = 0x01  # reserved (not used by default)
+
+def _u16_le(b0: int, b1: int) -> int:
+    return b0 | (b1 << 8)
+
+def dpu_encode(msg_type: int, payload: bytes, want_crc: bool = False) -> bytes:
+    """Encode a DPU frame.
+    Format (little-endian):
+    [T][Z][ver][flags][type u16][len u16][payload...][optional crc32 u32]
+    """
+    if payload is None:
+        payload = b""
+    flags = _DPU_FLAG_CRC32 if want_crc else 0
+    n = len(payload)
+    hdr = bytes([
+        _DPU_MAGIC0, _DPU_MAGIC1, _DPU_VER, flags,
+        msg_type & 0xFF, (msg_type >> 8) & 0xFF,
+        n & 0xFF, (n >> 8) & 0xFF,
+    ])
+    # NOTE: CRC32 not implemented on PC side yet (want_crc must stay False)
+    return hdr + payload
+
+class DPUParser:
+    """Incremental DPU parser for TCP streams (handles split/merged packets)."""
+    def __init__(self):
+        self.buf = bytearray()
+
+    def feed(self, data: bytes) -> None:
+        if data:
+            self.buf.extend(data)
+
+    def pop_frames(self):
+        out = []
+        while True:
+            if len(self.buf) < 8:
+                break
+
+            # resync to 'TZ'
+            i = 0
+            while i + 1 < len(self.buf) and not (self.buf[i] == _DPU_MAGIC0 and self.buf[i+1] == _DPU_MAGIC1):
+                i += 1
+            if i > 0:
+                del self.buf[:i]
+                if len(self.buf) < 8:
+                    break
+
+            if not (self.buf[0] == _DPU_MAGIC0 and self.buf[1] == _DPU_MAGIC1):
+                break
+
+            ver = self.buf[2]
+            if ver != _DPU_VER:
+                # drop 1 byte and resync
+                del self.buf[0]
+                continue
+
+            flags = self.buf[3]
+            msg_type = _u16_le(self.buf[4], self.buf[5])
+            n = _u16_le(self.buf[6], self.buf[7])
+
+            need = 8 + n + (4 if (flags & _DPU_FLAG_CRC32) else 0)
+            if len(self.buf) < need:
+                break
+
+            payload = bytes(self.buf[8:8+n])
+            del self.buf[:need]
+            out.append((msg_type, payload))
+        return out
+
 try:
     CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
     PARENT_DIR = os.path.dirname(CURRENT_DIR)
@@ -57,6 +132,14 @@ class WifiHubTab(QtWidgets.QWidget):
         # ip -> {"last_seen": float, "name": Optional[str]}
         self.peers = {}
         self.peers_lock = threading.Lock()
+        
+        self.ip_to_name = {}      # ip_str -> name
+        self.name_to_ip = {}      # name -> ip_str (optional)
+
+
+        # Active TCP connections (ip -> socket)
+        self.tcp_clients = {}
+        self.tcp_clients_lock = threading.Lock()
 
         # Queues for thread-safe UI updates
         self.log_queue = queue.Queue()
@@ -222,7 +305,7 @@ class WifiHubTab(QtWidgets.QWidget):
         send_layout.setSpacing(6)
 
         label = QtWidgets.QLabel(
-            "Send message (e.g. 'LED 0 255 0 20', 'OFF', 'PING'):"
+            "Send message (e.g. 'LED 0 255 0 20', 'BAT', 'PING'):"
         )
         label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         main_layout.addWidget(label)
@@ -296,6 +379,22 @@ class WifiHubTab(QtWidgets.QWidget):
             pass
 
         threading.Thread(target=self._discovery_burst, daemon=True).start()
+    
+    
+    
+    def _set_device_name(self, ip_str: str, name: str):
+        name = (name or "").strip()
+        if not name:
+            return
+        self.ip_to_name[ip_str] = name
+        self.name_to_ip[name] = ip_str
+        # Refresh UI list/table if you have a method for that
+        try:
+            self._refresh_devices_ui()
+        except Exception:
+            pass
+
+
 
     def _discovery_burst(self):
         """
@@ -415,10 +514,10 @@ class WifiHubTab(QtWidgets.QWidget):
                     # also do NOT log HUB-ACK for HELLO
                 except OSError as e:
                     # only log if something goes wrong
-                    self._log(f"[UDP] HUB-ACK send failed to {ip}: {e}")
+                    self._log(f"[UDP] HUB-ACK send failed to {self._peer_tag(ip)}: {e}")
             else:
                 # Normal message: log + update last_seen
-                self._log(f"[UDP RX] from {ip}:{port} -> {text!r}")
+                self._log(f"[UDP RX {self._peer_tag(ip)}:{port}] {text!r}")
                 self._learn_peer(ip)
 
         try:
@@ -452,7 +551,7 @@ class WifiHubTab(QtWidgets.QWidget):
                 break
 
             ip, port = addr
-            self._log(f"[TCP] Connection from {ip}:{port}")
+            self._log(f"[TCP] Connection from {self._peer_tag(ip)}:{port}")
             threading.Thread(
                 target=self._handle_tcp_client,
                 args=(conn, addr),
@@ -465,88 +564,181 @@ class WifiHubTab(QtWidgets.QWidget):
             pass
         self._log("[TCP] Listener stopped.")
 
+    
     def _handle_tcp_client(self, conn, addr):
-        ip, port = addr
-        self._learn_peer(ip)
+            ip, port = addr
+            self._learn_peer(ip)
 
-        with conn:
-            while self.running:
-                try:
-                    data = conn.recv(4096)
-                except OSError:
-                    break
-                if not data:
-                    break
-                text = data.decode("utf-8", errors="replace").strip()
-                self._log(f"[TCP RX {ip}] {text!r}")
-                self._learn_peer(ip)
+            # Register this TCP client so we can send commands back
+            with self.tcp_clients_lock:
+                self.tcp_clients[ip] = conn
 
-        self._log(f"[TCP] Connection closed from {ip}:{port}")
+            parser = DPUParser()
+
+            try:
+                with conn:
+                    while self.running:
+                        try:
+                            data = conn.recv(4096)
+                        except OSError:
+                            break
+                        if not data:
+                            break
+
+                        self._learn_peer(ip)
+
+                        # DPU framed stream
+                        parser.feed(data)
+                        for msg_type, payload in parser.pop_frames():
+                            if msg_type == 1:
+                                text = payload.decode("utf-8", errors="replace").strip()
+                                if text:
+                                    self._log(f"[TCP RX {self._peer_tag(ip)}] {text!r}")
+                                    # If nodes ever send "HELLO <name>" via TCP, learn it
+                                    if text.startswith("HELLO"):
+                                        parts = text.split(maxsplit=1)
+                                        name = parts[1] if len(parts) > 1 else None
+                                        self._learn_peer(ip, name)
+                            else:
+                                self._log(f"[TCP RX {self._peer_tag(ip)}] frame type={msg_type} len={len(payload)}")
+            finally:
+                with self.tcp_clients_lock:
+                    if self.tcp_clients.get(ip) is conn:
+                        self.tcp_clients.pop(ip, None)
+
+            self._log(f"[TCP] Connection closed from {self._peer_tag(ip)}:{port}")
 
     # ------------------------------------------------------------------
     # Peer tracking + sending (same logic)
     # ------------------------------------------------------------------
     def _learn_peer(self, ip: str, name: str | None = None):
+        """Track peers by IP, but prefer showing device name when available.
+
+        If no name has ever been provided, we assign a stable, friendly alias
+        (e.g., TinZr-40) so the UI does not show only raw IPs. If a real name
+        arrives later (HELLO <name>), it overwrites the alias.
+        """
         with self.peers_lock:
             entry = self.peers.get(ip, {"last_seen": time.time(), "name": None})
             entry["last_seen"] = time.time()
-            if name is not None:
-                entry["name"] = name
+
+            if name is not None and str(name).strip():
+                entry["name"] = str(name).strip()
+            else:
+                if not entry.get("name"):
+                    try:
+                        last = ip.split(".")[-1]
+                        entry["name"] = f"TinZr-{last}"
+                    except Exception:
+                        entry["name"] = ip
+
             self.peers[ip] = entry
         self._update_peers_list()
 
+
+    def _peer_name(self, ip: str) -> str:
+        """Return best-known device name for an IP (falls back to the IP string)."""
+        with self.peers_lock:
+            info = self.peers.get(ip)
+            if info and info.get("name"):
+                return str(info["name"])
+        return ip
+
+    def _peer_tag(self, ip: str) -> str:
+        """Short tag used in log lines: prefers name, but keeps IP for clarity."""
+        name = self._peer_name(ip)
+        return f"{name}<{ip}>" if name and name != ip else ip
+
+
+
+    def _peer_tag(self, ip: str) -> str:
+        """Short tag used in log lines: prefers name, but keeps IP for clarity."""
+        name = self._peer_name(ip)
+        return f"{name}<{ip}>" if name and name != ip else ip
+
+
     def _update_peers_list(self):
-        self.event_queue.put(("peers_updated", None))
+            self.event_queue.put(("peers_updated", None))
+
+
+    def _tcp_send_text(self, ip: str, text: str) -> bool:
+        """Send a text command/event over TCP using DPU type=1. Returns True on success."""
+        payload = (text.strip() + "\n").encode("utf-8")
+        frame = dpu_encode(1, payload)
+
+        with self.tcp_clients_lock:
+            conn = self.tcp_clients.get(ip)
+
+        if conn is None:
+            return False
+
+        try:
+            conn.sendall(frame)
+            return True
+        except OSError:
+            # drop dead socket
+            with self.tcp_clients_lock:
+                if self.tcp_clients.get(ip) is conn:
+                    self.tcp_clients.pop(ip, None)
+            return False
 
     def on_send_all(self):
-        msg = self.send_entry.text().strip()
-        if not msg:
-            return
-        data = msg.encode("utf-8")
+            msg = self.send_entry.text().strip()
+            if not msg:
+                return
 
-        with self.peers_lock:
-            targets = list(self.peers.keys())
+            with self.peers_lock:
+                targets = list(self.peers.keys())
 
-        if not targets:
-            self._log("[SEND] No peers to send to.")
-            return
+            if not targets:
+                self._log("[SEND] No peers to send to.")
+                return
 
-        if self.send_sock is None:
-            self._log("[SEND] Send socket not available.")
-            return
+            for ip in targets:
+                # Prefer TCP (DPU), fallback to UDP
+                if self._tcp_send_text(ip, msg):
+                    self._log(f"[SEND] TCP(DPU) -> {self._peer_tag(ip)}:{self.tcp_port} : {msg!r}")
+                    continue
 
-        for ip in targets:
-            try:
-                self.send_sock.sendto(data, (ip, self.udp_port))
-                self._log(f"[SEND] UDP -> {ip}:{self.udp_port} : {msg!r}")
-            except OSError as e:
-                self._log(f"[SEND] Failed to send to {ip}: {e}")
+                if self.send_sock is None:
+                    self._log("[SEND] UDP send socket not available (and TCP not connected).")
+                    continue
+
+                try:
+                    self.send_sock.sendto(msg.encode("utf-8"), (ip, self.udp_port))
+                    self._log(f"[SEND] UDP -> {self._peer_tag(ip)}:{self.udp_port} : {msg!r}")
+                except OSError as e:
+                    self._log(f"[SEND] Failed to send to {self._peer_tag(ip)}: {e}")
 
     def on_send_selected(self):
-        msg = self.send_entry.text().strip()
-        if not msg:
-            return
-        data = msg.encode("utf-8")
+            msg = self.send_entry.text().strip()
+            if not msg:
+                return
 
-        selected_items = self.peers_list.selectedItems()
-        if not selected_items:
-            self._log("[SEND] No peer selected.")
-            return
+            selected_items = self.peers_list.selectedItems()
+            if not selected_items:
+                self._log("[SEND] No peer selected.")
+                return
 
-        if self.send_sock is None:
-            self._log("[SEND] Send socket not available.")
-            return
+            for item in selected_items:
+                ip = item.data(QtCore.Qt.UserRole)
+                if not ip:
+                    continue
 
-        for item in selected_items:
-            # item text: "name_or_ip [ip] (last_seen ...)"
-            ip = item.data(QtCore.Qt.UserRole)
-            if not ip:
-                continue
-            try:
-                self.send_sock.sendto(data, (ip, self.udp_port))
-                self._log(f"[SEND] UDP -> {ip}:{self.udp_port} : {msg!r}")
-            except OSError as e:
-                self._log(f"[SEND] Failed to send to {ip}: {e}")
+                # Prefer TCP (DPU), fallback to UDP
+                if self._tcp_send_text(ip, msg):
+                    self._log(f"[SEND] TCP(DPU) -> {self._peer_tag(ip)}:{self.tcp_port} : {msg!r}")
+                    continue
+
+                if self.send_sock is None:
+                    self._log("[SEND] UDP send socket not available (and TCP not connected).")
+                    continue
+
+                try:
+                    self.send_sock.sendto(msg.encode("utf-8"), (ip, self.udp_port))
+                    self._log(f"[SEND] UDP -> {self._peer_tag(ip)}:{self.udp_port} : {msg!r}")
+                except OSError as e:
+                    self._log(f"[SEND] Failed to send to {self._peer_tag(ip)}: {e}")
 
     # ------------------------------------------------------------------
     # Queue polling & UI helpers
@@ -578,6 +770,7 @@ class WifiHubTab(QtWidgets.QWidget):
         with self.peers_lock:
             for ip, info in sorted(self.peers.items()):
                 name = info.get("name") or ip
+                display = f"{name} ({ip})" if name and name != ip else ip
                 last_seen = info.get("last_seen", 0.0)
                 age = time.time() - last_seen
                 label = f"{name} [{ip}] ({age:.1f}s ago)"

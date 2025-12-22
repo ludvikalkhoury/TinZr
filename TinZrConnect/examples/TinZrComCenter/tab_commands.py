@@ -161,6 +161,50 @@ LED 0 0 255        # blue, full power
 
 <br>
 
+<h2>✨ LED FLASH</h2>
+
+<div class="codeblock">LED_FLASH &lt;R&gt; &lt;G&gt; &lt;B&gt; [BR] [N]</div>
+
+<div class="bullet">
+• Flash the LED a specified number of times using the given color and brightness.
+</div>
+
+<div class="comment">
+Parsed by <b>_handleHubText()</b> on the node.<br><br>
+
+• <b>R G B</b>: LED color values (0–255)<br>
+• <b>BR</b> (optional): brightness (0–255)<br>
+&nbsp;&nbsp;— If omitted, the last brightness is reused<br>
+• <b>N</b> (optional): number of flashes<br>
+&nbsp;&nbsp;— If omitted or 0, defaults to five flashes<br><br>
+
+Internally:<br>
+— Updates cached LED state (<code>_curR,_curG,_curB,_curBr</code>)<br>
+— Calls:<br>
+<code>TinZrLED.flashColor(r, g, b, br, n)</code><br>
+— Sends acknowledgment back to hub
+</div>
+
+<div class="codeblock">
+LED_FLASH 255 0 0 50 3     # red, dim, 3 flashes
+LED_FLASH 0 255 0 100 5   # green, medium, 5 flashes
+LED_FLASH 0 0 255         # blue, single flash (reuse BR)
+</div>
+
+<div class="comment">
+Response format:<br>
+<code>OK LED_FLASH &lt;R&gt; &lt;G&gt; &lt;B&gt; &lt;BR&gt; &lt;N&gt;</code>
+</div>
+
+<div class="bullet">
+• LED_FLASH does <b>not</b> change soft power state.<br>
+• LED returns to its previous steady state after flashing.<br>
+• Command is safe to issue repeatedly.
+</div>
+
+
+<br>
+
 <h2>📡 PING / PONG TEST</h2>
 
 <div class="codeblock">PING</div>
