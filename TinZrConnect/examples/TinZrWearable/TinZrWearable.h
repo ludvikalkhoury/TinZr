@@ -4,8 +4,8 @@
 
 #include "TinZrConfig.h"
 #include "TinZrCore.h"
-#include "TinZrConnections.h"   // TinZrBleConnect
-#include "TinZrLED.h"           // TinZrStatusLED
+#include "TinZrBLE.h"          // TinZrBLEConnect (GATT)
+#include "TinZrLED.h"          // TinZrStatusLED
 
 struct TinZrWearableConfig {
 	const char* hostname           = "TinZrWearable";
@@ -21,9 +21,9 @@ enum class TinZrWearMode : uint8_t {
 	NUM_MODES
 };
 
-class TinZrWearable {
+class TinZrWearableClass {
 public:
-	TinZrWearable();
+	TinZrWearableClass();
 	void begin(const TinZrWearableConfig& cfg);
 	void handle();
 	void forceBatteryUpdate();
@@ -31,32 +31,28 @@ public:
 private:
 	TinZrWearableConfig _cfg{};
 
-	// Status LED (same style as TinZrNode)
-	TinZrStatusLED    _statusLED;
 
 #if TINZR_ENABLE_BLE
-	TinZrBleConnect   _ble;
-	bool              _bleStarted      = false;
-	bool              _bleWasConnected = false;
+	TinZrBLEConnect _ble;
+	bool           _bleStarted      = false;
+	bool           _bleWasConnected = false;
 #endif
 
 	// State
-	TinZrWearMode     _mode           = TinZrWearMode::BLE_ONLY;
+	TinZrWearMode _mode           = TinZrWearMode::BLE_ONLY;
 
 	// IMU required; PPG optional
-	bool              _sensorsReady   = false;  // kept for compatibility (== _imuReady)
-	bool              _imuReady       = false;  // IMU present/configured
-	bool              _ppgReady       = false;  // PPG present/configured (optional)
+	bool _sensorsReady = false;  // kept for compatibility (== _imuReady)
+	bool _imuReady     = false;  // IMU present/configured
+	bool _ppgReady     = false;  // PPG present/configured (optional)
 
-	bool              _streaming      = false;
-	unsigned long     _lastSampleMs   = 0;
-	bool              _wasSoftOn      = false;
+	bool          _streaming    = false;
+	unsigned long _lastSampleMs = 0;
+	bool          _wasSoftOn    = false;
 
 	// Internal handlers
-	static TinZrWearable* _self;
-	static void _bleCallbackStatic(IPAddress from,
-	                               const uint8_t* data,
-	                               size_t len);
+	static TinZrWearableClass* _self;
+	static void _bleWriteStatic(const uint8_t* data, size_t len);
 	void _handleBleCommand(const uint8_t* data, size_t len);
 
 	void _handleBLE();
@@ -67,3 +63,5 @@ private:
 	void _updateLED();
 	void _setErrorLED();
 };
+
+extern TinZrWearableClass TinZrWearable;

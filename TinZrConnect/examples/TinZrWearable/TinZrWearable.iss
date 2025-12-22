@@ -7,7 +7,7 @@ DefaultDirName={pf}\TinZr Wearable
 DefaultGroupName=TinZr Wearable
 OutputBaseFilename=TinZrWearableSetup
 ; Optional installer icon if you have one:
-SetupIconFile=C:\Users\lua4006\Desktop\GitRepo\arduino-esp32-tinzr\TinZrNet\examples\TinZrWearable\TinZr_small_logo.ico
+SetupIconFile=C:\Users\lua4006\Desktop\GitRepo\TinZr\TinZrConnect\examples\TinZrWearable\TinZr_small_logo.ico
 Compression=lzma
 SolidCompression=yes
 DisableDirPage=no
@@ -20,9 +20,9 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a &desktop icon"; GroupDescription: "Additional icons:"; Flags: unchecked
 
 [Files]
-Source: "C:\Users\lua4006\Desktop\GitRepo\arduino-esp32-tinzr\TinZrNet\examples\TinZrWearable\dist\TinZrWearable.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\Users\lua4006\Desktop\GitRepo\TinZr\TinZrConnect\examples\TinZrWearable\dist\TinZrWearable.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; If you have extra files (e.g., an icon), you can also include:
-Source: "C:\Users\lua4006\Desktop\GitRepo\arduino-esp32-tinzr\TinZrNet\examples\TinZrWearable\TinZr_small_logo.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\Users\lua4006\Desktop\GitRepo\TinZr\TinZrConnect\examples\TinZrWearable\TinZr_small_logo.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\TinZr Wearable"; Filename: "{app}\TinZrWearable.exe"
