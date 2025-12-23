@@ -76,6 +76,10 @@ FW_FS_HINT_HZ      = 250.0
 WRITE_EVERY_MS      = 200   # how often we attempt to write new synchronized rows
 WRITE_FLUSH_EVERY_N = 1     # flush after each write batch (keep crash-safe)
 
+# NEW: ticking-clock recording behavior
+AUTO_STOP_NO_DATA_SEC = 20.0   # if no frames from ANY device for this long while recording, stop recording
+GAP_MAX_SEC           = 0.25   # if a gap between samples around t exceeds this, write NaN (avoid bridging long dropouts)
+
 
 @dataclass
 class DeviceInfo:
@@ -263,6 +267,65 @@ class MultiDevicePlotWindow(QtWidgets.QMainWindow):
 
 
 # =========================
+# RSSI Bars widget (signal indicator)
+# =========================
+class RSSIBars(QtWidgets.QWidget):
+	def __init__(self, parent=None):
+		super().__init__(parent)
+		self._rssi = None
+		self.setFixedSize(60, 18)
+
+	def setRssi(self, rssi_dbm):
+		# rssi_dbm: int or None
+		self._rssi = rssi_dbm if rssi_dbm is None else int(rssi_dbm)
+		self.update()
+
+	def _bars_from_rssi(self, rssi):
+		# thresholds: tweak as desired
+		if rssi is None:
+			return 0
+		if rssi >= -55:
+			return 4
+		if rssi >= -65:
+			return 3
+		if rssi >= -75:
+			return 2
+		if rssi >= -85:
+			return 1
+		return 0
+
+	def paintEvent(self, event):
+		p = QtGui.QPainter(self)
+		p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+
+		w = self.width()
+		h = self.height()
+
+		n = 4
+		gap = 3
+		bar_w = int((w - gap * (n - 1)) / n) if n > 0 else w
+
+		bars_on = self._bars_from_rssi(self._rssi)
+
+		for i in range(n):
+			# bar heights grow to the right
+			bar_h = int(h * (0.35 + 0.18 * i))
+			x = i * (bar_w + gap)
+			y = h - bar_h
+
+			if i < bars_on:
+				brush = QtGui.QBrush(QtGui.QColor(180, 220, 255, 230))
+			else:
+				brush = QtGui.QBrush(QtGui.QColor(180, 220, 255, 60))
+
+			p.setPen(QtCore.Qt.NoPen)
+			p.setBrush(brush)
+			p.drawRoundedRect(QtCore.QRectF(x, y, bar_w, bar_h), 2, 2)
+
+		p.end()
+
+
+# =========================
 # Device row widget
 # =========================
 class TinZrDeviceRow(QtWidgets.QFrame):
@@ -304,6 +367,12 @@ class TinZrDeviceRow(QtWidgets.QFrame):
 		self.lbl_rate = QtWidgets.QLabel("RX: -- Hz")
 		self.lbl_rate.setStyleSheet("color: rgba(180,220,255,220); font-weight:600;")
 
+		# RSSI indicator
+		self.rssi_bars = RSSIBars()
+		self.rssi_bars.setToolTip("Signal strength (RSSI)")
+		self.lbl_rssi = QtWidgets.QLabel("RSSI: -- dBm")
+		self.lbl_rssi.setStyleSheet("color: rgba(180,220,255,200);")
+
 		self.btn_remove = QtWidgets.QPushButton("✕")
 		self.btn_remove.setFixedWidth(50)
 		self.btn_remove.clicked.connect(lambda: self.request_remove.emit(self.device_id))
@@ -325,7 +394,18 @@ class TinZrDeviceRow(QtWidgets.QFrame):
 		vbox.setContentsMargins(0, 0, 0, 0)
 		vbox.setSpacing(3)
 		vbox.addWidget(self.lbl_vitals, alignment=QtCore.Qt.AlignRight)
-		vbox.addWidget(self.lbl_rate, alignment=QtCore.Qt.AlignRight)
+
+		# RX + RSSI row
+		hrow = QtWidgets.QHBoxLayout()
+		hrow.setContentsMargins(0, 0, 0, 0)
+		hrow.setSpacing(8)
+		hrow.addWidget(self.lbl_rate, 0, QtCore.Qt.AlignRight)
+		hrow.addWidget(self.rssi_bars, 0, QtCore.Qt.AlignVCenter)
+		hrow.addWidget(self.lbl_rssi, 0, QtCore.Qt.AlignRight)
+		wr = QtWidgets.QWidget()
+		wr.setLayout(hrow)
+		vbox.addWidget(wr, alignment=QtCore.Qt.AlignRight)
+
 		w = QtWidgets.QWidget()
 		w.setLayout(vbox)
 		lay.addWidget(w, 1, 5, alignment=QtCore.Qt.AlignRight)
@@ -351,6 +431,22 @@ class TinZrDeviceRow(QtWidgets.QFrame):
 		else:
 			self.lbl_rate.setText(f"RX: {hz:.1f} Hz")
 
+	def set_rssi(self, rssi_dbm):
+		if rssi_dbm is None:
+			self.lbl_rssi.setText("RSSI: -- dBm")
+			self.rssi_bars.setRssi(None)
+			return
+		try:
+			r = int(rssi_dbm)
+		except Exception:
+			r = None
+		if r is None:
+			self.lbl_rssi.setText("RSSI: -- dBm")
+			self.rssi_bars.setRssi(None)
+		else:
+			self.lbl_rssi.setText(f"RSSI: {r:d} dBm")
+			self.rssi_bars.setRssi(r)
+
 	def set_toggle(self, checked: bool):
 		self._block_toggle = True
 		try:
@@ -371,6 +467,7 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 	scan_finished = QtCore.pyqtSignal(object, object)			# (devices, error)
 	vitals_update = QtCore.pyqtSignal(str, int, int, int)		# did, hr, spo2, batt
 	rate_update   = QtCore.pyqtSignal(str, float)				# did, hz
+	rssi_update   = QtCore.pyqtSignal(str, int)				# did, rssi_dbm
 	status_update = QtCore.pyqtSignal(str)
 
 	def __init__(self):
@@ -407,6 +504,7 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 		self.data_raw = {}			# did -> dict[key] -> list[float]
 		self.rec_idx_raw = {}		# did -> list[int]
 		self.rec_data_raw = {}		# did -> dict[key] -> list[float]
+		self.rec_t_raw = {}		# did -> list[float] (seconds since record start, perf_counter-based)
 
 		self.rec_keys = ["red","ir","ax","ay","az","gx","gy","gz","hr","spo2","batt"]
 
@@ -421,6 +519,13 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 		self.rx_hz = {}
 		self.rx_window_sec = float(RX_RATE_WINDOW_SEC)
 
+		# RSSI (per device)
+		self.rssi_dbm = {}
+		# Advertisement RSSI cache (addr -> (rssi_dbm, t_perf))
+		self.adv_rssi = {}
+		self._adv_scanner = None
+		self._rssi_fail_last = {}  # did -> perf_counter timestamp (throttle errors)
+
 		# ===== Recording output =====
 		self.record_path = None
 		self.record_file = None
@@ -433,6 +538,13 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 		self._csv_header_written = False
 		self._flush_counter = 0
 
+		# NEW: ticking-clock time base for recording
+		self._t_rec0 = None
+		self._last_any_record_frame = None
+
+		# NEW: per-device reconstructed sample time (seconds since _t_rec0)
+		self._rec_last_t = {}		# did -> last reconstructed t_rel
+
 		# ===== Plot buffers (snapshot-friendly) =====
 		self.plot_lock = threading.Lock()
 		self.plot_buffers = {}		# did -> dict[str] -> list[float]
@@ -442,6 +554,7 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 		self.scan_finished.connect(self._handle_scan_result)
 		self.vitals_update.connect(self._on_vitals_update)
 		self.rate_update.connect(self._on_rate_update)
+		self.rssi_update.connect(self._on_rssi_update)
 		self.status_update.connect(self._set_status)
 
 		# ===== UI =====
@@ -496,7 +609,7 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 		self.toggle_stream.setEnabled(False)
 		grid.addWidget(self.toggle_stream, r, 1, alignment=QtCore.Qt.AlignLeft)
 
-		grid.addWidget(QtWidgets.QLabel("Record (wide CSV)"), r, 2, alignment=QtCore.Qt.AlignRight)
+		grid.addWidget(QtWidgets.QLabel("Record"), r, 2, alignment=QtCore.Qt.AlignRight)
 		self.toggle_record = ToggleSwitch()
 		self.toggle_record.setChecked(False)
 		self.toggle_record.toggled.connect(self.on_record_toggled)
@@ -546,6 +659,16 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 		self.writer_timer.timeout.connect(self._writer_tick)
 		self.writer_timer.start(WRITE_EVERY_MS)
 
+		# NEW: RSSI poll timer (updates even when not streaming)
+		self.rssi_timer = QtCore.QTimer(self)
+		self.rssi_timer.setTimerType(QtCore.Qt.PreciseTimer)
+		self.rssi_timer.timeout.connect(self._rssi_tick)
+		self.rssi_timer.start(1000)
+
+		# Start a continuous advertisement scanner to obtain RSSI on Windows (WinRT)
+		# This avoids calling BleakScanner.discover() repeatedly, which can crash on WinRT.
+		self._ensure_adv_scanner_started()
+
 	def eventFilter(self, obj, event):
 		if obj is self.btn_scan and event.type() == QtCore.QEvent.Resize:
 			self._center_spinner_on_button()
@@ -564,6 +687,43 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 	def _run_ble_loop(self):
 		asyncio.set_event_loop(self.loop)
 		self.loop.run_forever()
+
+
+	def _ensure_adv_scanner_started(self):
+		"""Start a continuous BLE advertisement scanner (for RSSI) once."""
+		if getattr(self, "_adv_scanner", None) is not None:
+			return
+		try:
+			asyncio.run_coroutine_threadsafe(self._start_adv_scanner_async(), self.loop)
+		except Exception:
+			pass
+
+	async def _start_adv_scanner_async(self):
+		"""Run a long-lived BleakScanner with detection_callback to collect adv RSSI."""
+		if getattr(self, "_adv_scanner", None) is not None:
+			return
+		try:
+			def _cb(device, adv):
+				try:
+					addr = getattr(device, "address", None)
+					if not addr:
+						return
+					# NOTE: AdvertisementData.rssi is the supported API (BLEDevice.rssi is deprecated)
+					rssi = getattr(adv, "rssi", None)
+					if rssi is None:
+						return
+					self.adv_rssi[addr] = (int(rssi), time.perf_counter())
+				except Exception:
+					pass
+
+			self._adv_scanner = BleakScanner(detection_callback=_cb)
+			await self._adv_scanner.start()
+		except Exception as e:
+			self._adv_scanner = None
+			try:
+				self.status_update.emit(f"Adv RSSI scanner failed: {e}")
+			except Exception:
+				pass
 
 	# ============ Status ============
 	def _set_status(self, text: str):
@@ -682,6 +842,7 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 			self.data_raw[did] = {k: [] for k in ("ax","ay","az","gx","gy","gz","red","ir")}
 			self.rec_idx_raw[did] = []
 			self.rec_data_raw[did] = {k: [] for k in self.rec_keys}
+			self.rec_t_raw[did] = []
 
 		with self.fs_lock:
 			self.fs_est[did] = float(FW_FS_HINT_HZ)
@@ -690,6 +851,12 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 			self.rx_win_t0[did] = time.perf_counter()
 			self.rx_win_cnt[did] = 0
 			self.rx_hz[did] = 0.0
+
+		self.rssi_dbm[did] = None
+		try:
+			row.set_rssi(None)
+		except Exception:
+			pass
 
 		with self.plot_lock:
 			self.plot_buffers[did] = {"idx": [], "ax": [], "ay": [], "az": [], "gx": [], "gy": [], "gz": [], "red": [], "ir": []}
@@ -743,6 +910,7 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 				self.device_order.remove(did)
 
 		self._batt_cache.pop(did, None)
+		self.rssi_dbm.pop(did, None)
 
 		# Only now: drop client and buffers
 		self.byte_buf.pop(did, None)
@@ -778,7 +946,47 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 
 		self.status_update.emit("Removed device (disconnected).")
 
-		
+	
+	@QtCore.pyqtSlot(str)
+	def _handle_ble_disconnected(self, did: str):
+		# mark disconnected
+		self.connected.discard(did)
+		self.rssi_dbm.pop(did, None)
+
+		# UI: turn off connect slider + clear RSSI
+		row = self.rows.get(did)
+		if row:
+			row.set_toggle(False)
+			row.set_rssi(None)
+
+		# If streaming and no devices remain, turn off Stream toggle
+		if self.streaming and len(self.connected) == 0:
+			self.streaming = False
+			self.toggle_stream.setChecked(False)
+
+		# Optional: best-effort cleanup on the BLE loop
+		# (won't hurt if already disconnected)
+		try:
+			asyncio.run_coroutine_threadsafe(self._disconnect_device_async(did), self.loop)
+		except Exception:
+			pass
+
+		self.status_update.emit(f"Connection lost: {row.alias() if row else did}")
+
+
+
+	def _on_ble_disconnected(self, did: str):
+		"""
+		Called automatically by Bleak when a device disconnects unexpectedly.
+		"""
+		# Run UI/state changes in the Qt thread
+		QtCore.QMetaObject.invokeMethod(
+			self,
+			"_handle_ble_disconnected",
+			QtCore.Qt.QueuedConnection,
+			QtCore.Q_ARG(str, did),
+		)
+
 	
 	# ============ Connect / disconnect ============
 	def _on_row_connect_changed(self, did: str, connect: bool):
@@ -795,7 +1003,10 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 			return
 
 		info = self.rows[did].info
-		client = BleakClient(info.address, timeout=10.0)
+		client = BleakClient(	info.address,	
+								timeout=10.0,
+								disconnected_callback=lambda c: self._on_ble_disconnected(did)
+								)
 
 		try:
 			await client.connect()
@@ -806,6 +1017,9 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 
 			self.rows[did].set_toggle(True)
 			self.status_update.emit(f"Connected: {self.rows[did].alias()}")
+
+			# initial RSSI read
+			asyncio.run_coroutine_threadsafe(self._read_rssi_async(did), self.loop)
 
 		except Exception as e:
 			try:
@@ -824,7 +1038,12 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 		if not client:
 			if did in self.rows:
 				self.rows[did].set_toggle(False)
+				try:
+					self.rows[did].set_rssi(None)
+				except Exception:
+					pass
 			self.connected.discard(did)
+			self.rssi_dbm.pop(did, None)
 			return
 
 		try:
@@ -845,9 +1064,14 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 
 		self.clients.pop(did, None)
 		self.connected.discard(did)
+		self.rssi_dbm.pop(did, None)
 
 		if did in self.rows:
 			self.rows[did].set_toggle(False)
+			try:
+				self.rows[did].set_rssi(None)
+			except Exception:
+				pass
 
 		self.status_update.emit(f"Disconnected: {self.rows[did].alias() if did in self.rows else did}")
 
@@ -899,6 +1123,44 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 		except Exception:
 			pass
 
+	
+	async def _read_rssi_async(self, did: str):
+		client = self.clients.get(did)
+		if not client:
+			return
+
+		rssi = None
+
+		# 1) Newer Bleak API
+		try:
+			if hasattr(client, "get_rssi"):
+				rssi = await client.get_rssi()
+		except Exception:
+			rssi = None
+
+		# 2) Some backends expose it on the backend object
+		if rssi is None:
+			try:
+				backend = getattr(client, "_backend", None)
+				if backend is not None and hasattr(backend, "get_rssi"):
+					rssi = await backend.get_rssi()
+			except Exception:
+				rssi = None
+
+		# 3) If still None, RSSI not available on this stack
+		if rssi is None:
+			try:
+				self._rssi_fail_last[did] = time.perf_counter()
+			except Exception:
+				pass
+			return
+
+		try:
+			self.rssi_update.emit(did, int(rssi))
+		except Exception:
+			pass
+
+
 	# ============ Recording ============
 	def on_record_toggled(self, checked: bool):
 		if checked:
@@ -913,9 +1175,11 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 			self.toggle_record.setChecked(False)
 			self.status_update.emit("Add devices first.")
 			return
+	
+	
+		timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+		default_name = f"TinZrMultiWearable_recording_{timestamp}.csv"
 
-		ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-		default_name = f"TinZrMultiWearable_recording_{ts}.csv"
 
 		start_dir = os.path.dirname(os.path.abspath(__file__))
 		fpath, _ = QtWidgets.QFileDialog.getSaveFileName(
@@ -949,8 +1213,17 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 		with self.data_lock:
 			for did in self.rec_devices_order:
 				self.rec_idx_raw[did].clear()
+				self.rec_t_raw[did].clear()
 				for k in self.rec_data_raw[did]:
 					self.rec_data_raw[did][k].clear()
+
+		# NEW: ticking-clock time origin for this recording
+		self._t_rec0 = time.perf_counter()
+		self._last_any_record_frame = self._t_rec0
+
+
+		# NEW: clear reconstructed timestamp continuity
+		self._rec_last_t.clear()
 
 		# NEW: write header placeholders now (data will be appended immediately)
 		self._write_cursor = 0
@@ -993,14 +1266,73 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 		with self.data_lock:
 			for did in list(self.rec_devices_order):
 				self.rec_idx_raw[did].clear()
+				self.rec_t_raw[did].clear()
 				for k in self.rec_data_raw[did]:
 					self.rec_data_raw[did][k].clear()
 
 	# ============ Save-as-you-go writer ============
+	
+	# ============ RSSI polling ============
+	def _rssi_tick(self):
+		"""Update RSSI bars/label.
+
+		We keep a continuous advertisement scanner running (WinRT-safe) and use
+		AdvertisementData.rssi when available. This works even when devices are
+		disconnected: once they advertise again, RSSI resumes automatically.
+		"""
+		now = time.perf_counter()
+
+		# Update RSSI for ALL devices shown in the UI (connected or not).
+		for did, row in list(self.rows.items()):
+			# 1) Prefer advertisement RSSI (from continuous scanner)
+			pair = self.adv_rssi.get(did)
+			if pair is not None:
+				rssi, ts = pair
+				if (now - float(ts)) <= 3.0:
+					row.set_rssi(int(rssi))
+					continue
+
+			# 2) If no recent advertisements, optionally try connection-RSSI if supported
+			# (Most WinRT/dotnet stacks won't support it; we keep this best-effort.)
+			if did in self.connected:
+				try:
+					client = self.clients.get(did)
+					backend = getattr(client, "_backend", None) if client else None
+					has_get = (client is not None and hasattr(client, "get_rssi")) or (backend is not None and hasattr(backend, "get_rssi"))
+					if has_get:
+						# Throttle attempts if backend keeps throwing
+						last_fail = float(self._rssi_fail_last.get(did, 0.0))
+						if (now - last_fail) >= 2.0:
+							asyncio.run_coroutine_threadsafe(self._read_rssi_async(did), self.loop)
+						else:
+							row.set_rssi(None)
+					else:
+						row.set_rssi(None)
+				except Exception:
+					row.set_rssi(None)
+			else:
+				# Not connected and no recent ads => unknown
+				row.set_rssi(None)
+
 	def _writer_tick(self):
 		# Keep file updated while recording (do NOT do heavy work in BLE notify thread)
 		if not self.recording:
 			return
+
+		# Auto-stop if nothing has been received from ANY device for too long
+		now = time.perf_counter()
+		if self._last_any_record_frame is not None:
+			if (now - float(self._last_any_record_frame)) >= float(AUTO_STOP_NO_DATA_SEC):
+				self.status_update.emit(f"No data for {AUTO_STOP_NO_DATA_SEC:.0f}s → auto-stopping recording.")
+				# stop gracefully without re-triggering toggled logic twice
+				try:
+					self.toggle_record.blockSignals(True)
+					self.toggle_record.setChecked(False)
+				finally:
+					self.toggle_record.blockSignals(False)
+				self._stop_recording()
+				return
+
 		self._write_available_rows(final=False)
 
 	def _write_header_placeholders(self):
@@ -1034,75 +1366,99 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 
 	def _write_available_rows(self, final: bool = False):
 		"""
-		Write synchronized rows that are currently available for ALL devices,
-		on the shared fixed-rate grid (record_fs).
-		We only write rows up to the current common overlap across devices.
+		Ticking-clock writer:
+		- time_s is based on perf_counter() since recording started (self._t_rec0)
+		- we ALWAYS advance time (fixed record_fs grid)
+		- if a device has no data for a given time, we write NaN for that device's fields
 		"""
 		f = self.record_file
 		if f is None or not self._csv_header_written:
 			return
+
+		if self._t_rec0 is None:
+			# Should not happen, but fail safe
+			self._t_rec0 = time.perf_counter()
+			self._last_any_record_frame = self._t_rec0
 
 		with self.state_lock:
 			devs = list(self.rec_devices_order)
 		if not devs:
 			return
 
-		# Snapshot buffers + Fs under lock (short)
-		with self.data_lock:
-			snap = {}
-			for did in devs:
-				idx = list(self.rec_idx_raw.get(did, []))
-				if len(idx) < 2:
-					# not enough yet
-					return
-				snap[did] = {
-					"idx": idx,
-					"data": {k: list(self.rec_data_raw[did].get(k, [])) for k in self.rec_keys}
-				}
+		now = time.perf_counter()
+		t_end = float(now - float(self._t_rec0))
+		if t_end < 0:
+			t_end = 0.0
 
-		with self.fs_lock:
-			fs_snap = dict(self.fs_est)
-
-		# Determine common overlap end-time (best effort)
-		t_ends = []
-		fs_origs = {}
-		for did in devs:
-			idx = np.asarray(snap[did]["idx"], dtype=float)
-			fs = float(fs_snap.get(did, FW_FS_HINT_HZ))
-			if fs <= 0:
-				fs = float(FW_FS_HINT_HZ)
-			fs_origs[did] = fs
-			t_raw = (idx - idx[0]) / fs
-			t_ends.append(float(t_raw[-1]))
-
-		if not t_ends:
-			return
-
-		t_end_common = min(t_ends)
-
-		# How many output rows exist so far?
-		n_out = int(t_end_common * self.record_fs)
+		# How many output rows should exist up to NOW?
+		n_out = int(t_end * float(self.record_fs))
 		if n_out <= self._write_cursor:
 			return
 
 		dt = 1.0 / float(self.record_fs)
 
-		# Precompute per-device time axes once per tick
-		dev_axes = {}
-		for did in devs:
-			fs = fs_origs[did]
-			idx = np.asarray(snap[did]["idx"], dtype=float)
-			t_raw = (idx - idx[0]) / fs
-			dev_axes[did] = t_raw
+		# Snapshot buffers under lock (short)
+		with self.data_lock:
+			snap = {}
+			for did in devs:
+				tt = list(self.rec_t_raw.get(did, []))
+				snap[did] = {
+					"t": tt,
+					"data": {k: list(self.rec_data_raw.get(did, {}).get(k, [])) for k in self.rec_keys},
+				}
 
-		def zoh_at(t, t_raw, vals):
-			# last sample at or before t
-			j = int(np.searchsorted(t_raw, t, side="right") - 1)
-			if j < 0:
-				j = 0
-			if j >= len(vals):
-				j = len(vals) - 1
-			return float(vals[j])
+		def _fmt(v, is_intish: bool = False):
+			if v is None or (isinstance(v, float) and np.isnan(v)):
+				return "nan"
+			if is_intish:
+				return f"{float(v):.2f}"
+			return f"{float(v):.6f}"
+
+		def _interp_or_nan(t, tt, vv):
+			# Linear interpolation, but avoid bridging long gaps.
+			if tt is None or vv is None:
+				return float("nan")
+			L = min(len(tt), len(vv))
+			if L < 2:
+				return float("nan")
+			tt = np.asarray(tt[:L], dtype=float)
+			vv = np.asarray(vv[:L], dtype=float)
+
+			if t < tt[0] or t > tt[-1]:
+				return float("nan")
+
+			j = int(np.searchsorted(tt, t, side="left"))
+			if j <= 0 or j >= len(tt):
+				return float("nan")
+
+			# If the bracket gap is too large, treat as dropout
+			if (tt[j] - tt[j - 1]) > float(GAP_MAX_SEC):
+				return float("nan")
+
+			return float(np.interp(t, tt, vv))
+
+		def _zoh_or_nan(t, tt, vv):
+			# Zero-order hold ONLY within available time range (no holding past last sample).
+			if tt is None or vv is None:
+				return float("nan")
+			L = min(len(tt), len(vv))
+			if L < 1:
+				return float("nan")
+			tt = np.asarray(tt[:L], dtype=float)
+			vv = np.asarray(vv[:L], dtype=float)
+
+			if t < tt[0] or t > tt[-1]:
+				return float("nan")
+
+			j = int(np.searchsorted(tt, t, side="right") - 1)
+			if j < 0 or j >= len(vv):
+				return float("nan")
+
+			# If the time since last sample is too large, treat as dropout
+			if (t - tt[j]) > float(GAP_MAX_SEC):
+				return float("nan")
+
+			return float(vv[j])
 
 		# Write new rows [cursor .. n_out)
 		for i in range(self._write_cursor, n_out):
@@ -1110,33 +1466,18 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 			row = [f"{t:.6f}"]
 
 			for did in devs:
-				t_raw = dev_axes[did]
+				tt = snap[did]["t"]
+				dd = snap[did]["data"]
 
+				# IMPORTANT: per-device output order must match header
 				for k in self.rec_keys:
-					vals = np.asarray(snap[did]["data"][k], dtype=float)
-					L = min(len(vals), len(t_raw))
-					if L <= 0:
-						row.append("")
-						continue
-
-					vv = vals[:L]
-					tt = t_raw[:L]
-
+					vals = dd.get(k, [])
 					if k in ("hr", "spo2", "batt"):
-						v = zoh_at(t, tt, vv)
-						row.append(f"{v:.2f}")
+						v = _zoh_or_nan(t, tt, vals)
+						row.append(_fmt(v, is_intish=True))
 					else:
-						v = float(np.interp(t, tt, vv))
-						row.append(f"{v:.6f}")
-
-			# IMPORTANT: match your column ordering in the original file:
-			# Your original output order per device was:
-			# red, ir, ax, ay, az, gx, gy, gz, hr, spo2, batt
-			# But rec_keys is ["red","ir","ax","ay","az","gx","gy","gz","hr","spo2","batt"],
-			# and we wrote in that order above, which matches the original.
-			#
-			# However: row currently includes ALL keys sequentially. We need to format per device
-			# exactly like original. Above loop appended keys in rec_keys order, which is correct.
+						v = _interp_or_nan(t, tt, vals)
+						row.append(_fmt(v, is_intish=False))
 
 			f.write(",".join(row) + "\n")
 
@@ -1150,6 +1491,7 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 			except Exception:
 				pass
 			self._flush_counter = 0
+
 
 	def _finalize_csv_header(self, path: str):
 		"""
@@ -1226,6 +1568,31 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 		now = time.perf_counter()
 		self._rx_rate_update(did, n_frames, now)
 
+		# If recording, reconstruct per-sample timestamps within this BLE packet
+		t_rel_first = None
+		dt_samp = None
+		if self.recording:
+			# Safety: ensure time origin exists
+			if self._t_rec0 is None:
+				self._t_rec0 = now
+				self._last_any_record_frame = now
+				self._rec_last_t.clear()
+
+			with self.fs_lock:
+				fs_now = float(self.fs_est.get(did, FW_FS_HINT_HZ))
+			if fs_now <= 0:
+				fs_now = float(FW_FS_HINT_HZ)
+			dt_samp = 1.0 / fs_now
+
+			last_t = self._rec_last_t.get(did, None)
+			if last_t is None:
+				# Back-date the burst so the LAST frame aligns closest to 'now'
+				t_rel_first = float(now - float(self._t_rec0)) - (n_frames - 1) * dt_samp
+				if t_rel_first < 0:
+					t_rel_first = 0.0
+			else:
+				t_rel_first = float(last_t) + dt_samp
+
 		for i in range(n_frames):
 			start = i * FRAME_SIZE
 			chunk = b[start:start + FRAME_SIZE]
@@ -1269,6 +1636,10 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 
 				# recording buffers
 				if self.recording:
+					# Reconstructed time since record start (ticking clock)
+					t_rel = float(t_rel_first + i * dt_samp)
+					self._last_any_record_frame = now
+					self.rec_t_raw[did].append(t_rel)
 					self.rec_idx_raw[did].append(sc)
 					self.rec_data_raw[did]["ax"].append(ax)
 					self.rec_data_raw[did]["ay"].append(ay)
@@ -1281,6 +1652,10 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 					self.rec_data_raw[did]["hr"].append(float(hr_i))
 					self.rec_data_raw[did]["spo2"].append(float(spo2_i))
 					self.rec_data_raw[did]["batt"].append(float(batt_i))
+
+					# Keep continuity across notifications
+					self._rec_last_t[did] = t_rel
+
 
 		remaining = n_bytes - n_frames * FRAME_SIZE
 		if remaining > 0:
@@ -1321,6 +1696,17 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 		if row:
 			row.set_vitals(hr, spo2, batt)
 
+	def _on_rssi_update(self, did: str, rssi: int):
+		if int(rssi) == 9999:
+			self.rssi_dbm[did] = None
+		else:
+			self.rssi_dbm[did] = int(rssi)
+
+		row = self.rows.get(did)
+		if row:
+			row.set_rssi(self.rssi_dbm.get(did))
+
+
 	def _on_rate_update(self, did: str, hz: float):
 		row = self.rows.get(did)
 		if row:
@@ -1353,6 +1739,12 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 			try:
 				if hasattr(self, "writer_timer"):
 					self.writer_timer.stop()
+			except Exception:
+				pass
+
+			try:
+				if hasattr(self, "rssi_timer"):
+					self.rssi_timer.stop()
 			except Exception:
 				pass
 
