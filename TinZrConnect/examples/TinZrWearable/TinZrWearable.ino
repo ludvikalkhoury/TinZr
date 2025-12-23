@@ -1,17 +1,26 @@
 #include <Arduino.h>
 #include "TinZrWearable.h"
 
-TinZrWearable Wearable;
-
 TinZrWearableConfig cfg = {
-	.hostname           = "TinZrWearable",
+	.hostname           = "TinZrBlack",
 	.sample_interval_ms = 4    // ≈ 250 Hz target
 };
 
 void setup() {
-	Wearable.begin(cfg);
+
+	TinZrWearable.begin(cfg);
+
+	pinMode(20, OUTPUT);
+	pinMode(21, OUTPUT);
+	digitalWrite(20, LOW);
+	digitalWrite(21, LOW);
+
+	delay(10);
+
+
+
 }
 
 void loop() {
-	Wearable.handle();
+	TinZrWearable.handle();
 }

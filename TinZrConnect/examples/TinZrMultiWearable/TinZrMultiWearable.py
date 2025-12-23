@@ -6,7 +6,6 @@ import asyncio
 import threading
 from dataclasses import dataclass
 from datetime import datetime
-from collections import deque
 
 import numpy as np
 from bleak import BleakScanner, BleakClient
@@ -15,6 +14,16 @@ import pyqtgraph as pg
 
 # =========================
 # TinZr Multi-Device Viewer
+# (Data logic matches TinZrWearable.py as closely as possible)
+#
+# Key idea:
+# - BLE notify parses frames for HUD (HR/SpO2/Batt) ALWAYS
+# - Plot/record buffers are ONLY updated when streaming == True
+# - Recording is synchronized on ONE shared fixed-rate time grid (record_fs).
+#
+# NEW (save-as-you-go):
+# - While recording is ON, we continuously write synchronized rows to disk.
+# - On STOP, we write remaining rows and finalize header fields (Fs_orig, N_out).
 # =========================
 
 os.environ["BLEAK_BACKEND"] = "dotnet"  # important on Windows
@@ -53,21 +62,19 @@ FRAME_SIZE   = FRAME_STRUCT.size  # 23 bytes
 ACC_SCALE = 1e-3
 GYR_SCALE = 1.0 / 100.0
 
-# ================== FIXED OUTPUT CONFIG ==================
-FS_OUT_HZ            = 150.0
-SYNC_TIMER_MS        = int(round(1000.0 / FS_OUT_HZ))
+# ================== Viewer Config (mirrors Wearable defaults) ==================
+FS_RESAMP_HZ    = 200.0    # fixed output Fs for saving (and plot resample)
+WINDOW_SEC      = 3.0      # seconds visible on screen
+UPDATE_MS       = 10       # GUI update period
+MAX_RAW_SAMPLES = 20000    # plot buffer cap (per device)
 
-# Plot resample (your plot window interpolates to this)
-FS_RESAMP_HZ         = 240.0
+# Rate estimate window (per device)
+RX_RATE_WINDOW_SEC = 1.0
+FW_FS_HINT_HZ      = 250.0
 
-FIFO_MAX_SECONDS     = 6.0
-FIFO_MAXLEN          = int(FIFO_MAX_SECONDS * 300.0)  # upper bound
-
-RX_RATE_WINDOW_SEC   = 1.0
-FW_FS_HINT_HZ        = 250.0
-
-PLOT_WINDOW_SEC      = 5.0
-PLOT_UPDATE_MS       = 20
+# NEW: file write cadence (save-as-you-go)
+WRITE_EVERY_MS      = 200   # how often we attempt to write new synchronized rows
+WRITE_FLUSH_EVERY_N = 1     # flush after each write batch (keep crash-safe)
 
 
 @dataclass
@@ -95,15 +102,19 @@ class MultiDevicePlotWindow(QtWidgets.QMainWindow):
 		super().__init__()
 		self.viewer = parent_viewer
 
-		self.setWindowTitle("TinZr Live Plots")
+		self.setWindowTitle("TinZr Wearable")
 		self.setWindowIcon(QtGui.QIcon("TinZr_small_logo.ico"))
 		self.resize(1100, 750)
 		apply_tinzr_theme(self)
 
 		screen = QtWidgets.QApplication.primaryScreen()
-		dpi = float(screen.logicalDotsPerInch()) if screen else 96.0
+		dpi = screen.logicalDotsPerInch() if screen is not None else 96.0
+		# 96 dpi = baseline scale 1.0
 		self._dpi_scale = dpi / 96.0
-		self._axis_label_pt = int(round(12 * self._dpi_scale))
+
+		# axis label font sizes (in points)
+		self._axis_label_pt = int(round(12 * self._dpi_scale))     # y-labels
+		self._time_label_pt = int(round(12 * self._dpi_scale))    # "Time (s)"
 
 		self.signal_order = [
 			"red", "ir",
@@ -131,7 +142,7 @@ class MultiDevicePlotWindow(QtWidgets.QMainWindow):
 		self.timer = QtCore.QTimer(self)
 		self.timer.setTimerType(QtCore.Qt.PreciseTimer)
 		self.timer.timeout.connect(self._update_all)
-		self.timer.start(PLOT_UPDATE_MS)
+		self.timer.start(UPDATE_MS)
 
 		self._rebuild_tabs()
 
@@ -144,9 +155,9 @@ class MultiDevicePlotWindow(QtWidgets.QMainWindow):
 		with self.viewer.state_lock:
 			devs = list(self.viewer.device_order)
 
-		for device_id in devs:
-			row = self.viewer.rows.get(device_id)
-			label = row.alias() if row else device_id
+		for did in devs:
+			row = self.viewer.rows.get(did)
+			label = row.alias() if row else did
 
 			w = QtWidgets.QWidget()
 			v = QtWidgets.QVBoxLayout(w)
@@ -197,53 +208,58 @@ class MultiDevicePlotWindow(QtWidgets.QMainWindow):
 				curves[key] = curve
 
 			self.tabs.addTab(w, label)
-			self.tab_widgets[device_id] = w
-			self.tab_axes[device_id] = axes
-			self.tab_curves[device_id] = curves
+			self.tab_widgets[did] = w
+			self.tab_axes[did] = axes
+			self.tab_curves[did] = curves
 
 	def _update_all(self):
+		# Pull plot snapshot (per device)
 		with self.viewer.plot_lock:
-			plot_snap = dict(self.viewer.plot_buffers)
+			snap = {did: dict(buf) for did, buf in self.viewer.plot_buffers.items()}
+		with self.viewer.fs_lock:
+			fs_snap = dict(self.viewer.fs_est)
 
-		n_ds = int(PLOT_WINDOW_SEC * FS_RESAMP_HZ)
-		if n_ds < 2:
-			return
-		t_ds = np.linspace(0.0, PLOT_WINDOW_SEC, n_ds, endpoint=False)
+		# time axis for display: fixed WINDOW_SEC in seconds
+		n_ds = int(max(2, round(WINDOW_SEC * FS_RESAMP_HZ)))
+		t_ds = np.linspace(0.0, WINDOW_SEC, n_ds, endpoint=False)
 
-		for device_id, buf in plot_snap.items():
-			if device_id not in self.tab_curves:
+		for did, buf in snap.items():
+			if did not in self.tab_curves:
 				continue
 
-			t = np.asarray(buf.get("t", []), dtype=float)
-			if len(t) < 4:
+			idx = np.asarray(buf.get("idx", []), dtype=float)
+			if len(idx) < 4:
 				continue
 
-			def _aligned(ykey):
-				y = np.asarray(buf.get(ykey, []), dtype=float)
-				L = min(len(t), len(y))
-				if L < 4:
-					return None, None
-				return t[-L:], y[-L:]
+			fs = float(fs_snap.get(did, FW_FS_HINT_HZ))
+			if fs <= 0:
+				fs = float(FW_FS_HINT_HZ)
+
+			# Build time axis from sample index (Wearable style assumption: uniform Fs)
+			# Make last sample appear at WINDOW_SEC.
+			t_raw = (idx - idx[-1]) / fs + WINDOW_SEC
+
+			# Only keep last WINDOW_SEC
+			t0 = t_raw[-1] - WINDOW_SEC
+			ix0 = int(np.searchsorted(t_raw, t0, side="left"))
+			tw = t_raw[ix0:]
+			if len(tw) < 2:
+				continue
 
 			for key in self.signal_order:
-				t_k, y = _aligned(key)
-				if t_k is None:
+				y = np.asarray(buf.get(key, []), dtype=float)
+				L = min(len(t_raw), len(y))
+				if L < 4:
+					continue
+				yw = y[-L:][ix0:]
+
+				if len(yw) < 2 or (tw[-1] <= tw[0]):
 					continue
 
-				t_last_k = t_k[-1]
-				t0_k = t_last_k - PLOT_WINDOW_SEC
-				ix0_k = int(np.searchsorted(t_k, t0_k, side="left"))
-				tw = t_k[ix0_k:] - t_k[ix0_k]
-				yw = y[ix0_k:]
-
-				if len(tw) < 2 or len(yw) < 2:
-					continue
-				if tw[-1] <= tw[0]:
-					continue
-
+				# Resample for smooth plotting
 				y_ds = np.interp(t_ds, tw, yw)
-				self.tab_curves[device_id][key].setData(t_ds, y_ds)
-				self.tab_axes[device_id][key].setXRange(0.0, PLOT_WINDOW_SEC, padding=0.0)
+				self.tab_curves[did][key].setData(t_ds, y_ds)
+				self.tab_axes[did][key].setXRange(0.0, WINDOW_SEC, padding=0.0)
 
 
 # =========================
@@ -292,7 +308,8 @@ class TinZrDeviceRow(QtWidgets.QFrame):
 		self.btn_remove.setFixedWidth(50)
 		self.btn_remove.clicked.connect(lambda: self.request_remove.emit(self.device_id))
 		self.btn_remove.setToolTip("Remove device from list")
-
+		
+		
 		lay.addWidget(QtWidgets.QLabel("Name"), 0, 0, alignment=QtCore.Qt.AlignRight)
 		lay.addWidget(self.ed_alias, 0, 1, 1, 2)
 
@@ -359,9 +376,9 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 	def __init__(self):
 		super().__init__()
 
-		self.setWindowTitle("TinZr Wearable (Multi) - Synced Fixed-Rate")
+		self.setWindowTitle("TinZr (Multi) Wearable")
 		self.setWindowIcon(QtGui.QIcon("TinZr_small_logo.ico"))
-		self.setFixedSize(900, 740)
+		self.setFixedSize(900, 700)
 		self.setWindowFlag(QtCore.Qt.MSWindowsFixedSizeDialogHint, True)
 		apply_tinzr_theme(self)
 
@@ -377,44 +394,46 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 		self.rows = {}				# did -> TinZrDeviceRow
 		self.connected = set()		# did
 		self.streaming = False
+		self._batt_cache = {}  # did -> last battery %
 		self.recording = False
 
 		self.state_lock = threading.Lock()
-		self.device_order = []		# list of did
+		self.device_order = []		# list of did (UI order)
 
-		# ===== Raw sample FIFOs =====
-		# each entry: (t, vec_dict)
-		self.q_lock = threading.Lock()
-		self.q = {}					# did -> deque
-		self.q_max = int(FIFO_MAXLEN)
+		# ===== Wearable-style per-device raw buffers =====
+		self.data_lock = threading.Lock()
+		self.sample_count = {}		# did -> int
+		self.idx_raw = {}			# did -> list[int]
+		self.data_raw = {}			# did -> dict[key] -> list[float]
+		self.rec_idx_raw = {}		# did -> list[int]
+		self.rec_data_raw = {}		# did -> dict[key] -> list[float]
 
-		# ===== Timestamp reconstruction =====
+		self.rec_keys = ["red","ir","ax","ay","az","gx","gy","gz","hr","spo2","batt"]
+
+		# ===== Fs estimate (per device) =====
 		self.fs_lock = threading.Lock()
-		self.fs_est = {}			# did -> Hz
-		self.dt_est = {}			# did -> seconds/sample
-		self.last_lock = threading.Lock()
-		self.last_raw = {}			# did -> (t, vec_dict)
+		self.fs_est = {}			# did -> Hz (updated from RX estimate)
 
-		# ===== Real RX sampling rate stats =====
+		# ===== Real RX sampling rate stats (per device) =====
 		self.rate_lock = threading.Lock()
 		self.rx_win_t0 = {}
 		self.rx_win_cnt = {}
 		self.rx_hz = {}
 		self.rx_window_sec = float(RX_RATE_WINDOW_SEC)
 
-		# ===== Fixed-rate writer timer =====
-		self.sync_timer = QtCore.QTimer(self)
-		self.sync_timer.setTimerType(QtCore.Qt.PreciseTimer)
-		self.sync_timer.timeout.connect(self._sync_tick_write)
-
-		# ===== Recording (single wide CSV) =====
-		self.rec_file = None
-		self.rec_t0 = None
-		self.rec_tick_idx = 0
+		# ===== Recording output =====
+		self.record_path = None
+		self.record_file = None
+		self.record_fs = float(FS_RESAMP_HZ)  # fixed output grid
 		self.rec_devices_order = []
 		self.rec_alias_map = {}
 
-		# ===== Plot buffers for plotting (per device) =====
+		# NEW: incremental (save-as-you-go) writer state
+		self._write_cursor = 0
+		self._csv_header_written = False
+		self._flush_counter = 0
+
+		# ===== Plot buffers (snapshot-friendly) =====
 		self.plot_lock = threading.Lock()
 		self.plot_buffers = {}		# did -> dict[str] -> list[float]
 		self.plot_window = None
@@ -435,7 +454,7 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 		h_lay.setContentsMargins(0, 0, 0, 4)
 		h_lay.setSpacing(10)
 
-		title = QtWidgets.QLabel("TinZr Multi-Device (Synchronized Fixed-Rate)")
+		title = QtWidgets.QLabel("TinZr Multi-Device")
 		title.setStyleSheet("font-size: 16pt; font-weight: 600; color: #E3F2FD;")
 		h_lay.addWidget(title)
 		h_lay.addStretch(1)
@@ -444,7 +463,7 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 		ctrl = QtWidgets.QWidget()
 		grid = QtWidgets.QGridLayout(ctrl)
 		grid.setContentsMargins(0, 0, 0, 0)
-		grid.setHorizontalSpacing(12)
+		grid.setHorizontalSpacing(16)
 		grid.setVerticalSpacing(8)
 
 		r = 0
@@ -490,7 +509,7 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 		grid.addWidget(self.btn_plot, r, 4)
 
 		self.lbl_out = QtWidgets.QLabel(
-			f"Fixed output: {FS_OUT_HZ:.1f} Hz (timer {SYNC_TIMER_MS} ms) | Plot resample: {FS_RESAMP_HZ:.1f} Hz"
+			f"Fixed Fs: {self.record_fs:.1f} Hz"
 		)
 		self.lbl_out.setStyleSheet("color: rgba(200,240,255,200);")
 		grid.addWidget(self.lbl_out, r, 5, 1, 2, alignment=QtCore.Qt.AlignRight)
@@ -510,9 +529,22 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 		self.scroll.setWidget(self.devices_container)
 		main_layout.addWidget(self.scroll, stretch=1)
 
-		self.label_status = QtWidgets.QLabel("Ready.")
+		self.label_status = QtWidgets.QLabel("Status: Idle")
+		self.label_status.setObjectName("statusLabel")
 		self.label_status.setStyleSheet("color: rgba(255,255,255,170);")
 		main_layout.addWidget(self.label_status)
+
+		# GUI timer only for plot refresh (plot window pulls snapshots)
+		self.gui_timer = QtCore.QTimer(self)
+		self.gui_timer.setTimerType(QtCore.Qt.PreciseTimer)
+		self.gui_timer.timeout.connect(self._gui_tick)
+		self.gui_timer.start(UPDATE_MS)
+
+		# NEW: writer timer (save-as-you-go)
+		self.writer_timer = QtCore.QTimer(self)
+		self.writer_timer.setTimerType(QtCore.Qt.PreciseTimer)
+		self.writer_timer.timeout.connect(self._writer_tick)
+		self.writer_timer.start(WRITE_EVERY_MS)
 
 	def eventFilter(self, obj, event):
 		if obj is self.btn_scan and event.type() == QtCore.QEvent.Resize:
@@ -535,7 +567,7 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 
 	# ============ Status ============
 	def _set_status(self, text: str):
-		self.label_status.setText(text)
+		self.label_status.setText(f"Status: {text}")
 
 	# ============ Plot ============
 	def on_plot_clicked(self):
@@ -546,6 +578,39 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 		self.plot_window.show()
 		self.plot_window.raise_()
 		self.plot_window.activateWindow()
+
+	def _gui_tick(self):
+		# Keep plot_buffers in sync with latest raw buffers (lightweight snapshot for plot window)
+		with self.data_lock:
+			devs = list(self.device_order)
+			for did in devs:
+				if did not in self.idx_raw:
+					continue
+				idx = self.idx_raw[did]
+				if len(idx) == 0:
+					continue
+
+				# cap plot raw buffers like Wearable
+				if len(idx) > MAX_RAW_SAMPLES:
+					trim = len(idx) - MAX_RAW_SAMPLES
+					self.idx_raw[did] = idx[trim:]
+					for k in self.data_raw[did]:
+						self.data_raw[did][k] = self.data_raw[did][k][trim:]
+
+				# snapshot into plot buffer
+				with self.plot_lock:
+					pb = self.plot_buffers.get(did)
+					if pb is None:
+						pb = {"idx": [], "ax": [], "ay": [], "az": [], "gx": [], "gy": [], "gz": [], "red": [], "ir": []}
+						self.plot_buffers[did] = pb
+
+					with self.fs_lock:
+						fs = float(self.fs_est.get(did, FW_FS_HINT_HZ))
+					keep = int(max(100, round((WINDOW_SEC * fs) + 200)))
+
+					pb["idx"] = self.idx_raw[did][-keep:]
+					for k in ("ax","ay","az","gx","gy","gz","red","ir"):
+						pb[k] = self.data_raw[did][k][-keep:]
 
 	# ============ Scan ============
 	def on_scan_clicked(self):
@@ -595,14 +660,11 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 			self.status_update.emit("Device already added.")
 			return
 
-
 		alias = self.ed_new_alias.text().strip()
 		if not alias:
-			alias = info.name  # default alias = BLE device name (e.g., "TinZrRev4_01")
-		row = TinZrDeviceRow(did, info, alias=alias)
+			alias = info.name
 
-		
-		
+		row = TinZrDeviceRow(did, info, alias=alias)
 		row.connect_changed.connect(self._on_row_connect_changed)
 		row.request_remove.connect(self._on_row_remove)
 		self.rows[did] = row
@@ -610,23 +672,27 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 		with self.state_lock:
 			self.device_order.append(did)
 
-		# insert before stretch
 		self.devices_layout.insertWidget(self.devices_layout.count() - 1, row)
 
-		# init per-device buffers
-		with self.q_lock:
-			self.q[did] = deque(maxlen=self.q_max)
+		self.byte_buf[did] = bytearray()
+
+		with self.data_lock:
+			self.sample_count[did] = 0
+			self.idx_raw[did] = []
+			self.data_raw[did] = {k: [] for k in ("ax","ay","az","gx","gy","gz","red","ir")}
+			self.rec_idx_raw[did] = []
+			self.rec_data_raw[did] = {k: [] for k in self.rec_keys}
+
 		with self.fs_lock:
 			self.fs_est[did] = float(FW_FS_HINT_HZ)
-			self.dt_est[did] = 1.0 / float(FW_FS_HINT_HZ)
-		with self.last_lock:
-			self.last_raw[did] = None
+
 		with self.rate_lock:
 			self.rx_win_t0[did] = time.perf_counter()
 			self.rx_win_cnt[did] = 0
 			self.rx_hz[did] = 0.0
+
 		with self.plot_lock:
-			self.plot_buffers[did] = {k: [] for k in ("t","ax","ay","az","gx","gy","gz","red","ir")}
+			self.plot_buffers[did] = {"idx": [], "ax": [], "ay": [], "az": [], "gx": [], "gy": [], "gz": [], "red": [], "ir": []}
 
 		self.toggle_stream.setEnabled(True)
 		self.toggle_record.setEnabled(True)
@@ -636,10 +702,37 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 
 		self.status_update.emit(f"Added: {row.alias()}")
 
+	
 	def _on_row_remove(self, did: str):
-		if did in self.connected:
-			self._disconnect_device(did)
+		# If connected, disconnect FIRST (must happen before we pop self.clients[did])
+		if did in self.connected or did in self.clients:
+			row = self.rows.get(did)
+			if row:
+				# prevent double-click / reconnect spam
+				row.btn_remove.setEnabled(False)
+				row.toggle_connect.setEnabled(False)
 
+			# Fire STOP first (best effort), then disconnect and WAIT briefly
+			try:
+				fut_stop = asyncio.run_coroutine_threadsafe(self._send_cmd(did, CMD_STOP), self.loop)
+				try:
+					fut_stop.result(timeout=0.4)
+				except Exception:
+					pass
+			except Exception:
+				pass
+
+			try:
+				fut_disc = asyncio.run_coroutine_threadsafe(self._disconnect_device_async(did), self.loop)
+				try:
+					fut_disc.result(timeout=2.0)
+				except Exception:
+					# even if timeout, continue cleanup
+					pass
+			except Exception:
+				pass
+
+		# NOW it is safe to remove UI + cleanup local state
 		row = self.rows.pop(did, None)
 		if row:
 			row.setParent(None)
@@ -649,13 +742,28 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 			if did in self.device_order:
 				self.device_order.remove(did)
 
-		with self.q_lock:
-			self.q.pop(did, None)
+		self._batt_cache.pop(did, None)
+
+		# Only now: drop client and buffers
+		self.byte_buf.pop(did, None)
+		self.clients.pop(did, None)
+		self.connected.discard(did)
+
+		with self.data_lock:
+			self.sample_count.pop(did, None)
+			self.idx_raw.pop(did, None)
+			self.data_raw.pop(did, None)
+			self.rec_idx_raw.pop(did, None)
+			self.rec_data_raw.pop(did, None)
+
 		with self.fs_lock:
 			self.fs_est.pop(did, None)
-			self.dt_est.pop(did, None)
-		with self.last_lock:
-			self.last_raw.pop(did, None)
+
+		with self.rate_lock:
+			self.rx_win_t0.pop(did, None)
+			self.rx_win_cnt.pop(did, None)
+			self.rx_hz.pop(did, None)
+
 		with self.plot_lock:
 			self.plot_buffers.pop(did, None)
 
@@ -668,8 +776,10 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 			self.toggle_record.setChecked(False)
 			self.toggle_record.setEnabled(False)
 
-		self.status_update.emit("Removed device.")
+		self.status_update.emit("Removed device (disconnected).")
 
+		
+	
 	# ============ Connect / disconnect ============
 	def _on_row_connect_changed(self, did: str, connect: bool):
 		if connect:
@@ -692,7 +802,6 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 			await client.start_notify(TINZR_BLE_TX_CHAR_UUID, lambda sender, data: self._on_notify(did, data))
 
 			self.clients[did] = client
-			self.byte_buf[did] = bytearray()
 			self.connected.add(did)
 
 			self.rows[did].set_toggle(True)
@@ -703,20 +812,21 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 				await client.disconnect()
 			except Exception:
 				pass
-			self.rows[did].set_toggle(False)
+			if did in self.rows:
+				self.rows[did].set_toggle(False)
 			self.status_update.emit(f"Connect failed: {e}")
 
 	def _disconnect_device(self, did: str):
 		asyncio.run_coroutine_threadsafe(self._disconnect_device_async(did), self.loop)
 
 	async def _disconnect_device_async(self, did: str):
-		if did not in self.clients:
+		client = self.clients.get(did)
+		if not client:
 			if did in self.rows:
 				self.rows[did].set_toggle(False)
 			self.connected.discard(did)
 			return
 
-		client = self.clients.get(did)
 		try:
 			if self.streaming:
 				try:
@@ -730,12 +840,10 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 				pass
 
 			await client.disconnect()
-
 		except Exception:
 			pass
 
 		self.clients.pop(did, None)
-		self.byte_buf.pop(did, None)
 		self.connected.discard(did)
 
 		if did in self.rows:
@@ -760,13 +868,16 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 
 		self.streaming = True
 		self.status_update.emit("Streaming: starting...")
+
+		with self.data_lock:
+			for did in self.connected:
+				self.sample_count[did] = 0
+				self.idx_raw[did].clear()
+				for k in self.data_raw[did]:
+					self.data_raw[did][k].clear()
+
 		for did in list(self.connected):
 			asyncio.run_coroutine_threadsafe(self._send_cmd(did, CMD_START), self.loop)
-
-		# start fixed-rate writer (sync)
-		self.rec_tick_idx = 0
-		if not self.sync_timer.isActive():
-			self.sync_timer.start(SYNC_TIMER_MS)
 
 		self.status_update.emit("Streaming: ON")
 
@@ -777,11 +888,6 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 		self.status_update.emit("Streaming: stopping...")
 		for did in list(self.connected):
 			asyncio.run_coroutine_threadsafe(self._send_cmd(did, CMD_STOP), self.loop)
-
-		# stop timer (but if recording is ON, we keep it running)
-		if not self.recording and self.sync_timer.isActive():
-			self.sync_timer.stop()
-
 		self.status_update.emit("Streaming: OFF")
 
 	async def _send_cmd(self, did: str, cmd: bytes):
@@ -809,7 +915,7 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 			return
 
 		ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-		default_name = f"TinZrMulti_{ts}.csv"
+		default_name = f"TinZrMultiWearable_recording_{ts}.csv"
 
 		start_dir = os.path.dirname(os.path.abspath(__file__))
 		fpath, _ = QtWidgets.QFileDialog.getSaveFileName(
@@ -819,19 +925,17 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 			"CSV Files (*.csv);;All Files (*)"
 		)
 
-		# user cancelled
 		if not fpath:
 			self.toggle_record.setChecked(False)
 			self.status_update.emit("Recording cancelled.")
 			return
 
-		# enforce .csv
 		if not fpath.lower().endswith(".csv"):
 			fpath += ".csv"
 
-
 		try:
-			self.rec_file = open(fpath, "w", newline="")
+			self.record_file = open(fpath, "w", newline="")
+			self.record_path = fpath
 		except Exception as e:
 			self.toggle_record.setChecked(False)
 			self.status_update.emit(f"Record open failed: {e}")
@@ -841,119 +945,348 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 			self.rec_devices_order = list(self.device_order)
 		self.rec_alias_map = {did: self.rows[did].alias() for did in self.rec_devices_order if did in self.rows}
 
-		# header
-		cols = ["t_sec"]
-		for did in self.rec_devices_order:
-			a = _safe_name(self.rec_alias_map.get(did, did))
-			cols += [
-				f"{a}_ax", f"{a}_ay", f"{a}_az",
-				f"{a}_gx", f"{a}_gy", f"{a}_gz",
-				f"{a}_red", f"{a}_ir",
-				f"{a}_hr", f"{a}_spo2", f"{a}_batt"
-			]
-		self.rec_file.write(",".join(cols) + "\n")
-		self.rec_file.flush()
+		# clear rec buffers (Wearable style)
+		with self.data_lock:
+			for did in self.rec_devices_order:
+				self.rec_idx_raw[did].clear()
+				for k in self.rec_data_raw[did]:
+					self.rec_data_raw[did][k].clear()
+
+		# NEW: write header placeholders now (data will be appended immediately)
+		self._write_cursor = 0
+		self._csv_header_written = False
+		self._flush_counter = 0
+		self._write_header_placeholders()
 
 		self.recording = True
-		self.rec_t0 = time.perf_counter()
-		self.rec_tick_idx = 0
-
-		# recording requires fixed-rate writer
-		if not self.sync_timer.isActive():
-			self.sync_timer.start(SYNC_TIMER_MS)
-
-		self.status_update.emit(f"Recording: ON ({fpath})")
+		self.status_update.emit(f"Recording: ON (save-as-you-go + sync grid) → {fpath}")
 
 	def _stop_recording(self):
 		if not self.recording:
 			return
 		self.recording = False
 
+		# Write any remaining rows before finalizing
+		self._write_available_rows(final=True)
+
+		f = self.record_file
+		path = self.record_path
+		self.record_file = None
+
+		if f is None or path is None:
+			self.status_update.emit("Recording stopped (no file).")
+			return
+
 		try:
-			if self.rec_file:
-				self.rec_file.flush()
-				self.rec_file.close()
+			f.close()
 		except Exception:
 			pass
 
-		self.rec_file = None
-		self.rec_t0 = None
+		# Finalize header (Fs_orig_Hz + N_out) without touching data rows
+		try:
+			self._finalize_csv_header(path)
+			self.status_update.emit(f"Recording saved (synced) → {path}")
+		except Exception as e:
+			self.status_update.emit(f"Recording finalize error: {e}")
 
-		# if not streaming, we can stop the fixed-rate writer
-		if not self.streaming and self.sync_timer.isActive():
-			self.sync_timer.stop()
+		# Clear rec buffers (Wearable style)
+		with self.data_lock:
+			for did in list(self.rec_devices_order):
+				self.rec_idx_raw[did].clear()
+				for k in self.rec_data_raw[did]:
+					self.rec_data_raw[did][k].clear()
 
-		self.status_update.emit("Recording: OFF")
+	# ============ Save-as-you-go writer ============
+	def _writer_tick(self):
+		# Keep file updated while recording (do NOT do heavy work in BLE notify thread)
+		if not self.recording:
+			return
+		self._write_available_rows(final=False)
+
+	def _write_header_placeholders(self):
+		f = self.record_file
+		if f is None:
+			return
+
+		devs = list(self.rec_devices_order)
+
+		f.write("# TinZr Multi Wearable Recording (synchronized)\n")
+		f.write(f"# DateTime: {datetime.now().isoformat()}\n")
+		f.write("# __FS_ORIG_LINES__\n")          # placeholder (filled on stop)
+		f.write(f"# Fs_out_Hz: {self.record_fs:.6f}\n")
+		f.write("# N_out: __PLACEHOLDER__\n")     # placeholder (filled on stop)
+		f.write("# Columns: time_s + per-device channels (red, ir, ax, ay, az, gx, gy, gz, hr_bpm, spo2_pct, batt_pct)\n")
+
+		cols = ["time_s"]
+		for did in devs:
+			a = _safe_name(self.rec_alias_map.get(did, did))
+			cols += [
+				f"{a}_red", f"{a}_ir",
+				f"{a}_ax", f"{a}_ay", f"{a}_az",
+				f"{a}_gx", f"{a}_gy", f"{a}_gz",
+				f"{a}_hr_bpm", f"{a}_spo2_pct", f"{a}_batt_pct",
+			]
+		f.write(",".join(cols) + "\n")
+		f.write("# __DATA_START__\n")
+		f.flush()
+
+		self._csv_header_written = True
+
+	def _write_available_rows(self, final: bool = False):
+		"""
+		Write synchronized rows that are currently available for ALL devices,
+		on the shared fixed-rate grid (record_fs).
+		We only write rows up to the current common overlap across devices.
+		"""
+		f = self.record_file
+		if f is None or not self._csv_header_written:
+			return
+
+		with self.state_lock:
+			devs = list(self.rec_devices_order)
+		if not devs:
+			return
+
+		# Snapshot buffers + Fs under lock (short)
+		with self.data_lock:
+			snap = {}
+			for did in devs:
+				idx = list(self.rec_idx_raw.get(did, []))
+				if len(idx) < 2:
+					# not enough yet
+					return
+				snap[did] = {
+					"idx": idx,
+					"data": {k: list(self.rec_data_raw[did].get(k, [])) for k in self.rec_keys}
+				}
+
+		with self.fs_lock:
+			fs_snap = dict(self.fs_est)
+
+		# Determine common overlap end-time (best effort)
+		t_ends = []
+		fs_origs = {}
+		for did in devs:
+			idx = np.asarray(snap[did]["idx"], dtype=float)
+			fs = float(fs_snap.get(did, FW_FS_HINT_HZ))
+			if fs <= 0:
+				fs = float(FW_FS_HINT_HZ)
+			fs_origs[did] = fs
+			t_raw = (idx - idx[0]) / fs
+			t_ends.append(float(t_raw[-1]))
+
+		if not t_ends:
+			return
+
+		t_end_common = min(t_ends)
+
+		# How many output rows exist so far?
+		n_out = int(t_end_common * self.record_fs)
+		if n_out <= self._write_cursor:
+			return
+
+		dt = 1.0 / float(self.record_fs)
+
+		# Precompute per-device time axes once per tick
+		dev_axes = {}
+		for did in devs:
+			fs = fs_origs[did]
+			idx = np.asarray(snap[did]["idx"], dtype=float)
+			t_raw = (idx - idx[0]) / fs
+			dev_axes[did] = t_raw
+
+		def zoh_at(t, t_raw, vals):
+			# last sample at or before t
+			j = int(np.searchsorted(t_raw, t, side="right") - 1)
+			if j < 0:
+				j = 0
+			if j >= len(vals):
+				j = len(vals) - 1
+			return float(vals[j])
+
+		# Write new rows [cursor .. n_out)
+		for i in range(self._write_cursor, n_out):
+			t = i * dt
+			row = [f"{t:.6f}"]
+
+			for did in devs:
+				t_raw = dev_axes[did]
+
+				for k in self.rec_keys:
+					vals = np.asarray(snap[did]["data"][k], dtype=float)
+					L = min(len(vals), len(t_raw))
+					if L <= 0:
+						row.append("")
+						continue
+
+					vv = vals[:L]
+					tt = t_raw[:L]
+
+					if k in ("hr", "spo2", "batt"):
+						v = zoh_at(t, tt, vv)
+						row.append(f"{v:.2f}")
+					else:
+						v = float(np.interp(t, tt, vv))
+						row.append(f"{v:.6f}")
+
+			# IMPORTANT: match your column ordering in the original file:
+			# Your original output order per device was:
+			# red, ir, ax, ay, az, gx, gy, gz, hr, spo2, batt
+			# But rec_keys is ["red","ir","ax","ay","az","gx","gy","gz","hr","spo2","batt"],
+			# and we wrote in that order above, which matches the original.
+			#
+			# However: row currently includes ALL keys sequentially. We need to format per device
+			# exactly like original. Above loop appended keys in rec_keys order, which is correct.
+
+			f.write(",".join(row) + "\n")
+
+		self._write_cursor = n_out
+
+		# flush frequently (crash-safe)
+		self._flush_counter += 1
+		if self._flush_counter >= WRITE_FLUSH_EVERY_N or final:
+			try:
+				f.flush()
+			except Exception:
+				pass
+			self._flush_counter = 0
+
+	def _finalize_csv_header(self, path: str):
+		"""
+		Rewrite ONLY the header placeholders (Fs_orig lines, N_out),
+		leaving the already-written data rows untouched.
+		"""
+		tmp_path = path + ".tmp"
+
+		# Determine fs_origs and final n_out from buffers (same idea as stop logic)
+		with self.state_lock:
+			devs = list(self.rec_devices_order)
+		with self.fs_lock:
+			fs_snap = dict(self.fs_est)
+
+		# compute final n_out based on overlap currently written (cursor)
+		final_n_out = int(self._write_cursor)
+
+		fs_origs = {}
+		for did in devs:
+			fs = float(fs_snap.get(did, FW_FS_HINT_HZ))
+			if fs <= 0:
+				fs = float(FW_FS_HINT_HZ)
+			fs_origs[did] = fs
+
+		# Rewrite file: replace placeholder lines before __DATA_START__
+		with open(path, "r", newline="") as fin, open(tmp_path, "w", newline="") as fout:
+			in_header = True
+			for line in fin:
+				if in_header:
+					if line.strip() == "# __FS_ORIG_LINES__":
+						# emit fs_orig lines (same style as original stop header)
+						for did in devs:
+							alias = _safe_name(self.rec_alias_map.get(did, did))
+							fout.write(f"# {alias}_Fs_orig_Hz: {fs_origs[did]:.6f}\n")
+						continue
+
+					if line.startswith("# N_out:"):
+						fout.write(f"# N_out: {final_n_out:d}\n")
+						continue
+
+					fout.write(line)
+
+					if line.strip() == "# __DATA_START__":
+						in_header = False
+				else:
+					fout.write(line)
+
+		# Atomic-ish replace
+		try:
+			os.replace(tmp_path, path)
+		except Exception:
+			# fallback
+			try:
+				os.remove(path)
+			except Exception:
+				pass
+			os.rename(tmp_path, path)
 
 	# ============ Notify handler ============
 	def _on_notify(self, did: str, data: bytes):
 		# Called from Bleak notification context (in event loop thread)
-		if did not in self.byte_buf:
+		b = self.byte_buf.get(did)
+		if b is None:
 			self.byte_buf[did] = bytearray()
+			b = self.byte_buf[did]
 
-		b = self.byte_buf[did]
 		b.extend(data)
 
-		# Parse as many frames as possible
-		n = len(b) // FRAME_SIZE
-		if n <= 0:
+		n_bytes = len(b)
+		n_frames = n_bytes // FRAME_SIZE
+		if n_frames == 0:
 			return
 
-		# Keep remainder
-		chunk = b[: n * FRAME_SIZE]
-		rem = b[n * FRAME_SIZE :]
-		self.byte_buf[did] = bytearray(rem)
-
 		now = time.perf_counter()
+		self._rx_rate_update(did, n_frames, now)
 
-		# update rx rate stats using frame count
-		self._rx_rate_update(did, n, now)
+		for i in range(n_frames):
+			start = i * FRAME_SIZE
+			chunk = b[start:start + FRAME_SIZE]
 
-		# reconstruct timestamps (best-effort without firmware sample_idx)
-		with self.fs_lock:
-			dt = float(self.dt_est.get(did, 1.0 / FW_FS_HINT_HZ))
+			(
+				ax_i, ay_i, az_i,
+				gx_i, gy_i, gz_i,
+				red_i, ir_i,
+				hr_i, spo2_i,
+				batt_i
+			) = FRAME_STRUCT.unpack(chunk)
 
-		with self.last_lock:
-			last = self.last_raw.get(did)
+			# HUD always
+			self.vitals_update.emit(did, int(hr_i), int(spo2_i), int(batt_i))
 
-		# anchor: if first time, set last_t near "now - (n-1)*dt" so the burst spans dt steps
-		if last is None:
-			t0 = now - (n - 1) * dt
+			if not self.streaming:
+				continue
+
+			ax = ax_i * ACC_SCALE
+			ay = ay_i * ACC_SCALE
+			az = az_i * ACC_SCALE
+			gx = gx_i * GYR_SCALE
+			gy = gy_i * GYR_SCALE
+			gz = gz_i * GYR_SCALE
+			red = float(red_i)
+			ir  = float(ir_i)
+
+			with self.data_lock:
+				self.sample_count[did] = int(self.sample_count.get(did, 0)) + 1
+				sc = self.sample_count[did]
+
+				self.idx_raw[did].append(sc)
+				self.data_raw[did]["ax"].append(ax)
+				self.data_raw[did]["ay"].append(ay)
+				self.data_raw[did]["az"].append(az)
+				self.data_raw[did]["gx"].append(gx)
+				self.data_raw[did]["gy"].append(gy)
+				self.data_raw[did]["gz"].append(gz)
+				self.data_raw[did]["red"].append(red)
+				self.data_raw[did]["ir"].append(ir)
+
+				# recording buffers
+				if self.recording:
+					self.rec_idx_raw[did].append(sc)
+					self.rec_data_raw[did]["ax"].append(ax)
+					self.rec_data_raw[did]["ay"].append(ay)
+					self.rec_data_raw[did]["az"].append(az)
+					self.rec_data_raw[did]["gx"].append(gx)
+					self.rec_data_raw[did]["gy"].append(gy)
+					self.rec_data_raw[did]["gz"].append(gz)
+					self.rec_data_raw[did]["red"].append(red)
+					self.rec_data_raw[did]["ir"].append(ir)
+					self.rec_data_raw[did]["hr"].append(float(hr_i))
+					self.rec_data_raw[did]["spo2"].append(float(spo2_i))
+					self.rec_data_raw[did]["batt"].append(float(batt_i))
+
+		remaining = n_bytes - n_frames * FRAME_SIZE
+		if remaining > 0:
+			self.byte_buf[did] = b[-remaining:]
 		else:
-			t0 = last[0] + dt
-
-		# decode frames
-		for i in range(n):
-			off = i * FRAME_SIZE
-			ax, ay, az, gx, gy, gz, red, ir, hr, spo2, batt = FRAME_STRUCT.unpack_from(chunk, off)
-
-			vec = {
-				"ax": float(ax) * ACC_SCALE,
-				"ay": float(ay) * ACC_SCALE,
-				"az": float(az) * ACC_SCALE,
-				"gx": float(gx) * GYR_SCALE,
-				"gy": float(gy) * GYR_SCALE,
-				"gz": float(gz) * GYR_SCALE,
-				"red": float(red),
-				"ir":  float(ir),
-				"hr": int(hr),
-				"spo2": int(spo2),
-				"batt": int(batt),
-			}
-
-			t_sample = t0 + i * dt
-
-			with self.q_lock:
-				q = self.q.get(did)
-				if q is not None:
-					q.append((t_sample, vec))
-
-			with self.last_lock:
-				self.last_raw[did] = (t_sample, vec)
-
-			# update vitals on UI (latest frame)
-			if i == n - 1:
-				self.vitals_update.emit(did, int(hr), int(spo2), int(batt))
+			self.byte_buf[did].clear()
 
 	def _rx_rate_update(self, did: str, frames: int, now: float):
 		with self.rate_lock:
@@ -970,19 +1303,20 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 				self.rx_win_cnt[did] = 0
 				self.rate_update.emit(did, hz)
 
-				# adapt dt_est slowly (low-pass)
 				target_fs = max(10.0, min(1000.0, hz))
-				target_dt = 1.0 / target_fs
 				with self.fs_lock:
-					prev_dt = float(self.dt_est.get(did, 1.0 / FW_FS_HINT_HZ))
-					new_dt = 0.90 * prev_dt + 0.10 * target_dt
-					self.dt_est[did] = new_dt
-					self.fs_est[did] = 1.0 / max(new_dt, 1e-9)
+					prev = float(self.fs_est.get(did, float(FW_FS_HINT_HZ)))
+					self.fs_est[did] = 0.90 * prev + 0.10 * target_fs
 			else:
 				self.rx_win_cnt[did] = cnt
 
 	# ============ UI update slots ============
 	def _on_vitals_update(self, did: str, hr: int, spo2: int, batt: int):
+		try:
+			self._batt_cache[did] = int(batt)
+		except Exception:
+			self._batt_cache[did] = -1
+
 		row = self.rows.get(did)
 		if row:
 			row.set_vitals(hr, spo2, batt)
@@ -992,167 +1326,103 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 		if row:
 			row.set_rate(hz)
 
-	# ============ Fixed-rate writer (SYNC) ============
-	def _sync_tick_write(self):
-		# This is the heart: produce synchronized rows at FS_OUT_HZ
-		if (not self.streaming) and (not self.recording):
-			return
-
-		if self.rec_t0 is None:
-			self.rec_t0 = time.perf_counter()
-
-		t_out = self.rec_t0 + (self.rec_tick_idx / FS_OUT_HZ)
-
-		with self.state_lock:
-			devs = list(self.device_order)
-
-		row_vals = [f"{(t_out - self.rec_t0):.6f}"]
-
-		for did in devs:
-			# pull enough raw data to interpolate at t_out
-			x = self._interp_device(did, t_out)
-
-			if x is None:
-				# 11 columns blank-ish
-				row_vals += [""] * 11
+	def on_batt_clicked(self):
+		lines = []
+		for did in list(self.device_order):
+			row = self.rows.get(did)
+			if not row:
 				continue
+			name = row.alias()
+			lines.append(f"• {name}")
 
-			# x has floats and ints
-			row_vals += [
-				f"{x['ax']:.6f}", f"{x['ay']:.6f}", f"{x['az']:.6f}",
-				f"{x['gx']:.6f}", f"{x['gy']:.6f}", f"{x['gz']:.6f}",
-				f"{x['red']:.1f}", f"{x['ir']:.1f}",
-				str(int(x['hr'])), str(int(x['spo2'])), str(int(x['batt']))
-			]
+		msg = "\n".join(lines) if lines else "No devices added."
+		QtWidgets.QMessageBox.information(self, "Devices", msg)
 
-			# push to plot buffers (continuous)  ✅ USE x, NOT vec
-			with self.plot_lock:
-				pb = self.plot_buffers.get(did)
-				if pb is not None:
-					pb["t"].append(float(t_out))
-					for k in ("ax","ay","az","gx","gy","gz","red","ir"):
-						pb[k].append(float(x[k]))
+	def closeEvent(self, event: QtGui.QCloseEvent):
+		"""
+		Gracefully disconnect all devices when the app window closes.
+		"""
+		try:
+			self.status_update.emit("Closing: disconnecting devices...")
 
-					max_keep = int(FIFO_MAX_SECONDS * FS_OUT_HZ) + 200
-					for k in pb.keys():
-						if len(pb[k]) > max_keep:
-							pb[k] = pb[k][-max_keep:]
-
-		# write CSV
-		if self.recording and self.rec_file:
+			# Stop timers to prevent further UI/writer work
 			try:
-				self.rec_file.write(",".join(row_vals) + "\n")
-				# avoid flushing every line (slows down); flush periodically
-				if (self.rec_tick_idx % 50) == 0:
-					self.rec_file.flush()
+				self.gui_timer.stop()
+			except Exception:
+				pass
+			try:
+				if hasattr(self, "writer_timer"):
+					self.writer_timer.stop()
 			except Exception:
 				pass
 
-		self.rec_tick_idx += 1
-
-	def _interp_device(self, did: str, t_out: float):
-		# Returns dict with values at time t_out using linear interpolation
-		# If we don't have a future sample yet, we hold last sample (ZOH)
-		with self.q_lock:
-			q = self.q.get(did)
-			if not q or len(q) < 1:
-				return None
-
-			# Drop too-old points
-			t_min = t_out - FIFO_MAX_SECONDS
-			while len(q) > 2 and q[1][0] < t_min:
-				q.popleft()
-
-			# If still no data
-			if len(q) < 1:
-				return None
-
-			# If we only have one sample, hold it
-			if len(q) == 1:
-				return q[0][1]
-
-			# If t_out is earlier than first sample, return first
-			if t_out <= q[0][0]:
-				return q[0][1]
-
-			# Advance until q[0].t <= t_out <= q[1].t, if possible
-			while len(q) >= 2 and q[1][0] < t_out:
-				q.popleft()
-
-			# If we ran out of a future point, hold last
-			if len(q) < 2:
-				return q[-1][1]
-
-			t0, v0 = q[0]
-			t1, v1 = q[1]
-
-		# Guard degenerate
-		if t1 <= t0:
-			return v1
-
-		# Interpolate
-		if t_out <= t0:
-			alpha = 0.0
-		elif t_out >= t1:
-			alpha = 1.0
-		else:
-			alpha = (t_out - t0) / (t1 - t0)
-
-		def lerp(a, b):
-			return (1.0 - alpha) * float(a) + alpha * float(b)
-
-		out = {
-			"ax": lerp(v0["ax"], v1["ax"]),
-			"ay": lerp(v0["ay"], v1["ay"]),
-			"az": lerp(v0["az"], v1["az"]),
-			"gx": lerp(v0["gx"], v1["gx"]),
-			"gy": lerp(v0["gy"], v1["gy"]),
-			"gz": lerp(v0["gz"], v1["gz"]),
-			"red": lerp(v0["red"], v1["red"]),
-			"ir":  lerp(v0["ir"],  v1["ir"]),
-			# vitals: hold-last (no interpolation)
-			"hr": v1["hr"],
-			"spo2": v1["spo2"],
-			"batt": v1["batt"],
-		}
-		return out
-
-	# ============ Cleanup on close ============
-	def closeEvent(self, event):
-		# stop record/stream first so firmware stops sending
-		if self.recording:
-			self._stop_recording()
-		if self.streaming:
-			self._stop_stream_all()
-
-		# disconnect everything
-		for did in list(self.connected):
+			# Best-effort: stop streaming first
 			try:
-				self._disconnect_device(did)
+				if getattr(self, "streaming", False):
+					self.streaming = False
+					for did in list(self.connected):
+						asyncio.run_coroutine_threadsafe(self._send_cmd(did, CMD_STOP), self.loop)
 			except Exception:
 				pass
 
-		t0 = time.perf_counter()
-		while len(self.connected) > 0 and (time.perf_counter() - t0) < 1.2:
-			QtWidgets.QApplication.processEvents()
-			time.sleep(0.01)
+			# Disconnect all clients (async, but we wait a short time)
+			self._disconnect_all_on_close(timeout_sec=2.0)
 
-		if self.loop.is_running():
-			self.loop.call_soon_threadsafe(self.loop.stop)
+			# Stop the BLE event loop thread cleanly
+			try:
+				if self.loop and self.loop.is_running():
+					self.loop.call_soon_threadsafe(self.loop.stop)
+			except Exception:
+				pass
 
-		if self.ble_thread.is_alive():
-			self.ble_thread.join(timeout=2)
+		except Exception:
+			# Never block window close due to disconnect issues
+			pass
 
-		super().closeEvent(event)
+		event.accept()
 
 
-if __name__ == "__main__":
+	def _disconnect_all_on_close(self, timeout_sec: float = 2.0):
+		"""
+		Schedule disconnect for all devices and wait briefly.
+		"""
+		try:
+			dids = []
+			with self.state_lock:
+				dids = list(self.device_order)
+
+			futures = []
+			for did in dids:
+				# Only disconnect those with a client
+				if did in self.clients:
+					futures.append(asyncio.run_coroutine_threadsafe(self._disconnect_device_async(did), self.loop))
+
+			# Wait (briefly) so OS doesn't keep BLE connections alive
+			t0 = time.time()
+			for fut in futures:
+				remaining = max(0.05, timeout_sec - (time.time() - t0))
+				try:
+					fut.result(timeout=remaining)
+				except Exception:
+					pass
+		except Exception:
+			pass
+
+
+def main():
 	if hasattr(QtCore.Qt, "AA_EnableHighDpiScaling"):
 		QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling)
 	if hasattr(QtCore.Qt, "AA_UseHighDpiPixmaps"):
 		QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps)
 
 	app = QtWidgets.QApplication(sys.argv)
+	pg.setConfigOptions(antialias=True)
+
 	w = MultiTinZrViewer()
 	w.show()
+
 	sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+	main()

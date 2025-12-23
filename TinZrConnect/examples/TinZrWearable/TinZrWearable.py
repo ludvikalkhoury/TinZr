@@ -69,7 +69,7 @@ ACC_SCALE = 1e-3         # milli-units -> m/s^2  (firmware sends accel * 1000)
 GYR_SCALE = 1.0 / 100.0  # centi-units -> dps-ish or rad/s-ish
 
 # ================== Viewer Config ==================
-FS_RESAMP_HZ    = 220.0   # desired *fixed* output Fs (plot + save)
+FS_RESAMP_HZ    = 220   # desired *fixed* output Fs (plot + save)
 WINDOW_SEC      = 3.0     # seconds visible on screen
 UPDATE_MS       = 10      # GUI update period in ms
 MAX_RAW_SAMPLES = 20000   # safety cap on *plotting* raw buffer size
@@ -296,6 +296,16 @@ class WearableViewer(QtWidgets.QWidget):
         self.recording = False
         self.record_file = None
         self.record_path = None
+
+        # ===== Incremental CSV recording (save-as-you-go) =====
+        # If True, we write CSV rows continuously in small buffered chunks.
+        # This avoids holding a full recording in RAM.
+        self.record_incremental = True
+        self.csv_flush_every = 250  # write to disk every N samples
+        self._rec_lock = threading.Lock()
+        self._csv_lines = []
+        self._rec_start_sample = None
+        self._rec_wall_t0 = None
 
         # ===== Recording buffers (for FS_RESAMP_HZ Hz resampling on stop) =====
         self.rec_idx_raw = []
@@ -712,22 +722,26 @@ class WearableViewer(QtWidgets.QWidget):
         if self.recording:
             self.set_status("Already recording")
             return
+        
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         fname, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Save Recording",
-            "tinzr_recording_"+FS_RESAMP_HZ+"Hz.csv",   # hint in name that this will be resampled
+            "TinZrWearable_recording_"+str(ts)+".csv",   # hint in name that this will be resampled
             "CSV Files (*.csv);;All Files (*)",
         )
         if not fname:
             self.recording = False
             return
 
-        # Open file; we'll write everything (metadata + resampled data) on stop
+        # Open file
         try:
-            self.record_file = open(fname, "w", buffering=1)
+            # Use a larger buffer for fewer disk writes; we flush manually.
+            self.record_file = open(fname, "w", buffering=64 * 1024)
             self.record_path = fname
         except Exception as e:
+
             self.set_status(f"File error: {e}")
             self.record_file = None
             self.record_path = None
@@ -739,8 +753,25 @@ class WearableViewer(QtWidgets.QWidget):
         for k in self.rec_data_raw:
             self.rec_data_raw[k].clear()
 
+        # Initialize incremental writer state
+        self._rec_start_sample = self.sample_count
+        self._rec_wall_t0 = time.perf_counter()
+        self._csv_lines.clear()
+
+        # If saving-as-you-go, write header immediately.
+        if self.record_incremental and self.record_file is not None:
+            try:
+                self.record_file.write("# TinZr Wearable Recording (incremental)\n")
+                self.record_file.write(f"# DateTime: {datetime.now().isoformat()}\n")
+                self.record_file.write(f"# FixedFs_target_Hz: {self.record_fs:.6f}\n")
+                self.record_file.write("# Columns: time_s, red, ir, ax, ay, az, gx, gy, gz, hr_bpm, spo2_pct, batt_pct\n")
+                self.record_file.write("time_s,red,ir,ax,ay,az,gx,gy,gz,hr_bpm,spo2_pct,batt_pct\n")
+                self.record_file.flush()
+            except Exception as e:
+                self.set_status(f"Recording header error: {e}")
+
         self.recording = True
-        self.set_status(f"Recording (buffering, resample on stop) → {fname}")
+        self.set_status(f"Recording → {fname} ({'incremental' if self.record_incremental else 'buffer+resample on stop'})")
 
     def on_stop_recording_clicked(self):
         if not self.recording:
@@ -756,6 +787,30 @@ class WearableViewer(QtWidgets.QWidget):
         # Grab reference then clear handle so we don't double-close
         f = self.record_file
         self.record_file = None
+
+        # If we were writing incrementally, just flush remaining buffered lines and close.
+        if self.record_incremental:
+            try:
+                with self._rec_lock:
+                    if self._csv_lines:
+                        f.write("".join(self._csv_lines))
+                        self._csv_lines.clear()
+                    f.flush()
+                f.close()
+                self.set_status(f"Recording saved (incremental) → {self.record_path}")
+            except Exception as e:
+                try:
+                    f.close()
+                except Exception:
+                    pass
+                self.set_status(f"Recording error: {e}")
+            finally:
+                # Clear rec buffers (not used for incremental, but keep consistent)
+                self.rec_idx_raw.clear()
+                for k in self.rec_data_raw:
+                    self.rec_data_raw[k].clear()
+            return
+
 
         # If no samples recorded, just write minimal header
         n_raw = len(self.rec_idx_raw)
@@ -808,16 +863,16 @@ class WearableViewer(QtWidgets.QWidget):
                     data_out[key] = np.interp(t_ds, t_raw, vals)
 
             # ---- Write metadata ----
-            f.write("# TinZr Wearable Recording (resampled to fixed "+FS_RESAMP_HZ+" Hz)\n")
-            f.write(f"# DateTime: {datetime.now().isoformat()}\n")
-            f.write(f"# Fs_orig_Hz: {fs_orig:.6f}\n")
-            f.write(f"# Fs_out_Hz: {self.record_fs:.6f}\n")
-            f.write(f"# N_raw: {n_raw}\n")
-            f.write(f"# N_out: {n_out}\n")
-            f.write("# Columns: time_s, red, ir, ax, ay, az, gx, gy, gz, hr_bpm, spo2_pct, batt_pct\n")
+            f.write(f"# TinZr Wearable Recording (resampled to fixed {FS_RESAMP_HZ} Hz) \n")
+            f.write(f"# DateTime: {datetime.now().isoformat()} \n")
+            f.write(f"# Fs_orig_Hz: {fs_orig:.6f} \n")
+            f.write(f"# Fs_out_Hz: {self.record_fs:.6f} \n")
+            f.write(f"# N_raw: {n_raw} \n")
+            f.write(f"# N_out: {n_out} \n")
+            f.write(f"# Columns: time_s, red, ir, ax, ay, az, gx, gy, gz, hr_bpm, spo2_pct, batt_pct \n")
 
             # ---- Header ----
-            f.write("time_s,red,ir,ax,ay,az,gx,gy,gz,hr_bpm,spo2_pct,batt_pct\n")
+            f.write("time_s,red,ir,ax,ay,az,gx,gy,gz,hr_bpm,spo2_pct,batt_pct \n")
 
             # ---- Data rows ----
             red_out  = data_out["red"]
@@ -931,6 +986,35 @@ class WearableViewer(QtWidgets.QWidget):
                 self.rec_data_raw["hr"].append(float(hr_i))
                 self.rec_data_raw["spo2"].append(float(spo2_i))
                 self.rec_data_raw["batt"].append(float(batt_i))
+
+                # ---- Incremental CSV (save-as-you-go) ----
+                if self.record_incremental and self.record_file is not None:
+                    try:
+                        # Prefer sample-index / calibrated Fs when available; otherwise use wall-clock.
+                        if self.fs_est is not None and self.fs_est > 0 and self._rec_start_sample is not None:
+                            t_s = (self.sample_count - self._rec_start_sample) / float(self.fs_est)
+                        elif self._rec_wall_t0 is not None:
+                            t_s = time.perf_counter() - self._rec_wall_t0
+                        else:
+                            t_s = 0.0
+
+                        line = (
+                            f"{t_s:.6f},"
+                            f"{red:.6f},{ir:.6f},"
+                            f"{ax:.6f},{ay:.6f},{az:.6f},"
+                            f"{gx:.6f},{gy:.6f},{gz:.6f},"
+                            f"{float(hr_i):.2f},{float(spo2_i):.2f},{float(batt_i):.2f}\n"
+                        )
+
+                        with self._rec_lock:
+                            self._csv_lines.append(line)
+                            if len(self._csv_lines) >= int(self.csv_flush_every):
+                                self.record_file.write("".join(self._csv_lines))
+                                self._csv_lines.clear()
+                                self.record_file.flush()
+                    except Exception:
+                        # Don't crash BLE thread because of disk I/O
+                        pass
 
         # Drop consumed bytes
         remaining = n_bytes - n_frames * FRAME_SIZE
