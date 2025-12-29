@@ -1,5 +1,6 @@
 import os
 import math
+import bisect
 from datetime import datetime
 from PyQt5 import QtGui
 
@@ -69,10 +70,22 @@ ACC_SCALE = 1e-3         # milli-units -> m/s^2  (firmware sends accel * 1000)
 GYR_SCALE = 1.0 / 100.0  # centi-units -> dps-ish or rad/s-ish
 
 # ================== Viewer Config ==================
-FS_RESAMP_HZ    = 220   # desired *fixed* output Fs (plot + save)
+FS_RESAMP_HZ    = 100   # desired *fixed* output Fs (plot + save)
 WINDOW_SEC      = 3.0     # seconds visible on screen
 UPDATE_MS       = 10      # GUI update period in ms
 MAX_RAW_SAMPLES = 20000   # safety cap on *plotting* raw buffer size
+
+# NEW: file write cadence (save-as-you-go)
+WRITE_EVERY_MS      = 200   # how often we attempt to write new fixed-grid rows while recording
+WRITE_FLUSH_EVERY_N = 1     # flush after each write batch (keep crash-safe)
+
+# NEW: ticking-clock recording behavior
+AUTO_STOP_NO_DATA_SEC = 20.0   # if no frames received for this long while recording, stop recording
+GAP_MAX_SEC           = 0.25   # if last sample is older than this, treat as dropout -> NaN
+REC_PRUNE_KEEP_SEC    = 5.0    # keep last N seconds of raw samples for interpolation (prevents RecBuf growth)
+
+# Incoming (firmware) Fs hint used when fs_est isn't calibrated yet
+FW_FS_HINT_HZ      = 250.0
 
 
 # ================== Main Viewer ==================
@@ -185,6 +198,11 @@ class WearableViewer(QtWidgets.QWidget):
         self.label_status = QtWidgets.QLabel("Status: Idle")
         self.label_status.setObjectName("statusLabel")
         ctrl_layout.addWidget(self.label_status, row, 0, 1, 6)
+
+        # Second status row (debug telemetry)
+        self.label_status2 = QtWidgets.QLabel("")
+        self.label_status2.setStyleSheet("font-family: monospace; font-size: 9pt; color: #A8B3CF;")
+        ctrl_layout.addWidget(self.label_status2, row + 1, 0, 1, 6)
 
         main_layout.addWidget(ctrl_widget)
 
@@ -301,6 +319,26 @@ class WearableViewer(QtWidgets.QWidget):
         # If True, we write CSV rows continuously in small buffered chunks.
         # This avoids holding a full recording in RAM.
         self.record_incremental = True
+
+        # ---- NEW: ticking-clock writer state (mirrors MultiWearable logic) ----
+        self.rec_t_raw = []          # reconstructed per-sample time since record start (sec)
+        self._t_rec0 = None          # perf_counter() origin when recording starts
+        self._rec_last_t = None      # last reconstructed t_rel (sec)
+        self._last_any_record_frame = None
+        self._write_cursor = 0       # how many fixed-grid rows already written
+        self._flush_counter = 0
+        self._csv_header_written = False
+
+        # ---- NEW: debug counters (RX/NaN telemetry) ----
+        self._rx_packets = 0
+        self._rx_frames = 0
+        self._nan_rows = 0
+        self._last_rx_time = None
+        self._dbg_last_print = time.monotonic()
+
+        self.writer_timer = QtCore.QTimer(self)
+        self.writer_timer.setInterval(int(WRITE_EVERY_MS))
+        self.writer_timer.timeout.connect(self._writer_tick)
         self.csv_flush_every = 250  # write to disk every N samples
         self._rec_lock = threading.Lock()
         self._csv_lines = []
@@ -409,6 +447,44 @@ class WearableViewer(QtWidgets.QWidget):
             else:
                 self.batt_widget.setLevel(None)
 
+
+    def _update_debug_row(self):
+        """Update second status row with RX / NaN telemetry (cheap, once per second)."""
+        if not hasattr(self, "label_status2"):
+            return
+
+        now = time.monotonic()
+        dt = now - float(self._dbg_last_print)
+        if dt < 1.0:
+            return
+
+        # Rates
+        pkts_s = int(self._rx_packets / dt) if dt > 0 else 0
+        frames_s = int(self._rx_frames / dt) if dt > 0 else 0
+        nans_s = int(self._nan_rows / dt) if dt > 0 else 0
+
+        # Age since last RX
+        if self._last_rx_time is None:
+            last_rx_ms = -1
+        else:
+            last_rx_ms = int((now - float(self._last_rx_time)) * 1000.0)
+
+        rec_samples = len(self.rec_t_raw) if hasattr(self, "rec_t_raw") else 0
+        written = int(self._write_cursor) if hasattr(self, "_write_cursor") else 0
+        buf_bytes = len(self.byte_buf) if hasattr(self, "byte_buf") else 0
+
+        self.label_status2.setText(
+            f"RX: {pkts_s} pkts/s | {frames_s} frames/s | "
+            f"Last RX: {last_rx_ms} ms | NaNs: {nans_s}/s | "
+            f"RecBuf: {rec_samples} | Written: {written} | Buf: {buf_bytes}B"
+        )
+
+        # reset counters for next window
+        self._rx_packets = 0
+        self._rx_frames = 0
+        self._nan_rows = 0
+        self._dbg_last_print = now
+
     # ---------- Battery click handler ----------
     def on_batt_clicked(self):
         """
@@ -420,13 +496,18 @@ class WearableViewer(QtWidgets.QWidget):
             return
 
         if self.client and self.client.is_connected:
-            try:
-                fut = asyncio.run_coroutine_threadsafe(
+            async def _write_batt():
+                await asyncio.wait_for(
                     self.client.write_gatt_char(TINZR_BLE_RX_CHAR_UUID, CMD_BATT),
-                    self.loop
+                    timeout=2.0
                 )
-                fut.result()
+            
+            fut = asyncio.run_coroutine_threadsafe(_write_batt(), self.loop)
+            try:
+                fut.result(timeout=3.0)
                 self.set_status("Requested battery refresh")
+            except asyncio.TimeoutError:
+                self.set_status("Battery refresh timeout")
             except Exception as e:
                 self.set_status(f"Battery refresh error: {e}")
         else:
@@ -553,21 +634,57 @@ class WearableViewer(QtWidgets.QWidget):
 
         async def _connect_coro():
             client = BleakClient(addr)
-            await client.connect()
-            if not client.is_connected:
-                raise RuntimeError("Failed to connect")
-            # Subscribe to notifications
-            await client.start_notify(TINZR_BLE_TX_CHAR_UUID, self.on_rx)
-            return client
+            try:
+                # Professional: Add connection timeout (10 seconds)
+                await asyncio.wait_for(client.connect(), timeout=10.0)
+                if not client.is_connected:
+                    raise RuntimeError("Failed to connect")
+                
+                # Professional: Optional MTU negotiation for larger packets
+                # (Uncomment if your firmware supports it and you want >23 byte MTU)
+                # try:
+                #     await client.set_mtu(247)  # Request larger MTU
+                # except Exception:
+                #     pass  # Fall back to default MTU if not supported
+                
+                # Professional: Set up disconnection callback
+                def _disconnect_callback(client, future=None):
+                    if hasattr(self, 'scan_finished'):
+                        # Signal disconnection back to GUI thread
+                        QtCore.QTimer.singleShot(0, lambda: self._handle_ble_disconnect())
+                
+                # Subscribe to notifications
+                await client.start_notify(TINZR_BLE_TX_CHAR_UUID, self.on_rx)
+                
+                # Professional: Monitor connection state (Bleak handles this via callbacks)
+                return client
+            except asyncio.TimeoutError:
+                raise RuntimeError("Connection timeout - device not responding")
+            except Exception as e:
+                # Clean up on any error
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+                raise
 
         fut = asyncio.run_coroutine_threadsafe(_connect_coro(), self.loop)
         try:
-            client = fut.result()
+            # Professional: Add timeout for the future result
+            client = fut.result(timeout=12.0)  # Slightly longer than connection timeout
+        except asyncio.TimeoutError:
+            self.set_status("Connect timeout - operation took too long")
+            return False
         except Exception as e:
             self.set_status(f"Connect error: {e}")
             return False
 
         self.client = client
+        
+        # Professional: Set up connection monitoring
+        # Bleak will handle disconnection events, but we need to catch them
+        # For now, we rely on periodic connection checks in _handleBLE()
+        
         self.set_status("Connected")
         self.btn_scan.setEnabled(False)
         self.combo_devices.setEnabled(False)
@@ -576,6 +693,14 @@ class WearableViewer(QtWidgets.QWidget):
         self.toggle_stream.setEnabled(True)
         self.toggle_record.setEnabled(False)
         return True
+    
+    def _handle_ble_disconnect(self):
+        """Professional: Handle unexpected BLE disconnection."""
+        if self.client is None:
+            return
+        # This will be called if connection drops unexpectedly
+        self.set_status("Device disconnected unexpectedly")
+        self._disconnect()
 
     def _disconnect(self):
         """Disconnect and reset toggles."""
@@ -639,12 +764,19 @@ class WearableViewer(QtWidgets.QWidget):
 
         # 👉 SEND START COMMAND TO WEARABLE
         if CMD_START:
-            fut = asyncio.run_coroutine_threadsafe(
-                self.client.write_gatt_char(TINZR_BLE_RX_CHAR_UUID, CMD_START),
-                self.loop
-            )
+            async def _write_start():
+                await asyncio.wait_for(
+                    self.client.write_gatt_char(TINZR_BLE_RX_CHAR_UUID, CMD_START),
+                    timeout=2.0
+                )
+            
+            fut = asyncio.run_coroutine_threadsafe(_write_start(), self.loop)
             try:
-                fut.result()
+                fut.result(timeout=3.0)
+            except asyncio.TimeoutError:
+                self.set_status("Start command timeout - device not responding")
+                self.streaming = False
+                return
             except Exception as e:
                 self.set_status(f"Start cmd error: {e}")
                 self.streaming = False
@@ -669,6 +801,7 @@ class WearableViewer(QtWidgets.QWidget):
 
         # also reset recording buffers if we start a new stream
         self.rec_idx_raw.clear()
+        self.rec_t_raw.clear()
         for k in self.rec_data_raw:
             self.rec_data_raw[k].clear()
 
@@ -684,14 +817,21 @@ class WearableViewer(QtWidgets.QWidget):
 
         # 👉 SEND STOP COMMAND TO WEARABLE
         if CMD_STOP and self.client and self.client.is_connected:
-            fut = asyncio.run_coroutine_threadsafe(
-                self.client.write_gatt_char(TINZR_BLE_RX_CHAR_UUID, CMD_STOP),
-                self.loop
-            )
+            async def _write_stop():
+                await asyncio.wait_for(
+                    self.client.write_gatt_char(TINZR_BLE_RX_CHAR_UUID, CMD_STOP),
+                    timeout=2.0
+                )
+            
+            fut = asyncio.run_coroutine_threadsafe(_write_stop(), self.loop)
             try:
-                fut.result()
-            except Exception as e:
-                self.set_status(f"Stop cmd error: {e}")
+                fut.result(timeout=3.0)
+            except (asyncio.TimeoutError, Exception) as e:
+                # Non-critical if stop fails
+                if isinstance(e, asyncio.TimeoutError):
+                    self.set_status("Stop command timeout (non-critical)")
+                else:
+                    self.set_status(f"Stop cmd error: {e} (non-critical)")
 
         self.streaming = False
         self.toggle_record.setEnabled(False)
@@ -703,7 +843,232 @@ class WearableViewer(QtWidgets.QWidget):
 
         self.set_status("Streaming stopped")
 
-    # ============ Recording via toggle ============
+    
+    # ============ NEW: ticking-clock incremental writer ============
+    def _writer_tick(self):
+        # Keep file updated while recording (do NOT do heavy work in BLE notify thread)
+        if not self.recording:
+            return
+
+        # Auto-stop if nothing has been received for too long while recording
+        now = time.perf_counter()
+        if self._last_any_record_frame is not None:
+            if (now - float(self._last_any_record_frame)) >= float(AUTO_STOP_NO_DATA_SEC):
+                self.set_status(f"No data for {AUTO_STOP_NO_DATA_SEC:.0f}s → auto-stopping recording.")
+                try:
+                    self.toggle_record.blockSignals(True)
+                    self.toggle_record.setChecked(False)
+                finally:
+                    self.toggle_record.blockSignals(False)
+                self.on_stop_recording_clicked()
+                return
+
+        self._write_available_rows(final=False)
+
+    def _write_header_placeholders(self):
+        f = self.record_file
+        if f is None:
+            return
+
+        f.write("# TinZr Wearable Recording (ticking-clock)\n")
+        f.write(f"# DateTime: {datetime.now().isoformat()}\n")
+        f.write("# __FS_ORIG_LINES__\n")          # placeholder (filled on stop)
+        f.write(f"# Fs_out_Hz: {float(self.record_fs):.6f}\n")
+        f.write("# N_out: __PLACEHOLDER__\n")     # placeholder (filled on stop)
+        f.write("# Columns: time_s, red, ir, ax, ay, az, gx, gy, gz, hr_bpm, spo2_pct, batt_pct\n")
+        f.write("time_s,red,ir,ax,ay,az,gx,gy,gz,hr_bpm,spo2_pct,batt_pct\n")
+        f.write("# __DATA_START__\n")
+        f.flush()
+        self._csv_header_written = True
+
+    def _write_available_rows(self, final: bool = False):
+        '''
+        Ticking-clock writer:
+        - time_s is based on perf_counter() since recording started (self._t_rec0)
+        - we ALWAYS advance time (fixed record_fs grid)
+        - if no data for a given time, we write NaN for that field
+        '''
+        f = self.record_file
+        if f is None or not self._csv_header_written:
+            return
+
+        # Ensure _t_rec0 is initialized (should already be set, but fail-safe)
+        if self._t_rec0 is None:
+            # This should be rare - defensive initialization
+            with self._rec_lock:
+                if self._t_rec0 is None:  # Double-check under lock
+                    self._t_rec0 = time.perf_counter()
+                    self._last_any_record_frame = self._t_rec0
+
+        now = time.perf_counter()
+        t_end = float(now - float(self._t_rec0))
+        if t_end < 0:
+            t_end = 0.0
+
+        # How many output rows should exist up to NOW?
+        n_out = int(t_end * float(self.record_fs))
+        if n_out <= int(self._write_cursor):
+            return
+
+        dt = 1.0 / float(self.record_fs)
+
+        # Snapshot buffers under lock (short)
+        with self._rec_lock:
+            tt = list(self.rec_t_raw)
+            snap = {k: list(self.rec_data_raw.get(k, [])) for k in self.rec_keys}
+
+        def _fmt(v, is_intish: bool = False):
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                return "nan"
+            if is_intish:
+                return f"{float(v):.2f}"
+            return f"{float(v):.6f}"
+
+        def _interp_or_nan(t, tt, vv):
+            if tt is None or vv is None:
+                return float("nan")
+            L = min(len(tt), len(vv))
+            if L < 2:
+                return float("nan")
+            tta = np.asarray(tt[:L], dtype=float)
+            vva = np.asarray(vv[:L], dtype=float)
+
+            if t < tta[0] or t > tta[-1]:
+                return float("nan")
+
+            j = int(np.searchsorted(tta, t, side="right") - 1)
+            if j < 0 or j >= (len(vva) - 1):
+                return float("nan")
+
+            # avoid bridging long gaps
+            if (t - tta[j]) > float(GAP_MAX_SEC):
+                return float("nan")
+            if (tta[j + 1] - tta[j]) > float(GAP_MAX_SEC):
+                return float("nan")
+
+            t0 = tta[j]
+            t1 = tta[j + 1]
+            if t1 <= t0:
+                return float("nan")
+            a = (t - t0) / (t1 - t0)
+            return float(vva[j] * (1.0 - a) + vva[j + 1] * a)
+
+        def _zoh_or_nan(t, tt, vv):
+            if tt is None or vv is None:
+                return float("nan")
+            L = min(len(tt), len(vv))
+            if L < 1:
+                return float("nan")
+            tta = np.asarray(tt[:L], dtype=float)
+            vva = np.asarray(vv[:L], dtype=float)
+
+            if t < tta[0] or t > tta[-1]:
+                return float("nan")
+
+            j = int(np.searchsorted(tta, t, side="right") - 1)
+            if j < 0 or j >= len(vva):
+                return float("nan")
+
+            if (t - tta[j]) > float(GAP_MAX_SEC):
+                return float("nan")
+
+            return float(vva[j])
+
+        # Write new rows [cursor . n_out)
+        for i in range(int(self._write_cursor), int(n_out)):
+            t = i * dt
+            row = [f"{t:.6f}"]
+            all_nan = True
+
+            for k in self.rec_keys:
+                vals = snap.get(k, [])
+                if k in ("hr", "spo2", "batt"):
+                    v = _zoh_or_nan(t, tt, vals)
+                    row.append(_fmt(v, is_intish=True))
+                    if not (isinstance(v, float) and np.isnan(v)):
+                        all_nan = False
+                else:
+                    v = _interp_or_nan(t, tt, vals)
+                    row.append(_fmt(v, is_intish=False))
+                    if not (isinstance(v, float) and np.isnan(v)):
+                        all_nan = False
+
+            if all_nan:
+                self._nan_rows += 1
+            f.write(",".join(row) + "\n")
+
+        self._write_cursor = int(n_out)
+
+        # ---- NEW: prune raw record buffers so RecBuf doesn't grow without bound ----
+        # We only need a small tail of raw samples to bracket upcoming fixed-grid ticks.
+        # Keep last REC_PRUNE_KEEP_SEC seconds plus a 2-sample safety margin.
+        keep_from_t = max(0.0, (int(self._write_cursor) - 2) * dt - float(REC_PRUNE_KEEP_SEC))
+        try:
+            j = bisect.bisect_left(self.rec_t_raw, keep_from_t) if self.rec_t_raw else 0
+        except Exception:
+            j = 0
+
+        if j > 0:
+            with self._rec_lock:
+                # Recompute under lock in case buffers changed slightly
+                try:
+                    j2 = bisect.bisect_left(self.rec_t_raw, keep_from_t) if self.rec_t_raw else 0
+                except Exception:
+                    j2 = j
+                if j2 > 0:
+                    self.rec_t_raw = self.rec_t_raw[j2:]
+                    try:
+                        self.rec_idx_raw = self.rec_idx_raw[j2:]
+                    except Exception:
+                        pass
+                    for _k in self.rec_keys:
+                        _vv = self.rec_data_raw.get(_k, None)
+                        if _vv is not None:
+                            self.rec_data_raw[_k] = _vv[j2:]
+
+        # flush frequently (crash-safe)
+        self._flush_counter += 1
+        if self._flush_counter >= int(WRITE_FLUSH_EVERY_N) or final:
+            try:
+                f.flush()
+            except Exception:
+                pass
+            self._flush_counter = 0
+
+    def _finalize_csv_header(self, path: str):
+        '''Rewrite ONLY the header placeholders (Fs_orig, N_out), leaving data rows untouched.'''
+        tmp_path = path + ".tmp"
+
+        fs_orig = float(self.fs_est) if (self.fs_est is not None and self.fs_est > 0) else float(FW_FS_HINT_HZ)
+        final_n_out = int(self._write_cursor)
+
+        with open(path, "r", newline="") as fin, open(tmp_path, "w", newline="") as fout:
+            in_header = True
+            for line in fin:
+                if in_header:
+                    if line.strip() == "# __FS_ORIG_LINES__":
+                        fout.write(f"# Fs_orig_Hz: {fs_orig:.6f}\n")
+                        continue
+                    if line.startswith("# N_out:"):
+                        fout.write(f"# N_out: {final_n_out:d}\n")
+                        continue
+
+                    fout.write(line)
+                    if line.strip() == "# __DATA_START__":
+                        in_header = False
+                else:
+                    fout.write(line)
+
+        try:
+            os.replace(tmp_path, path)
+        except Exception:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+            os.rename(tmp_path, path)
+
+# ============ Recording via toggle ============
     def on_record_toggled(self, checked: bool):
         if checked:
             self.on_start_recording_clicked()
@@ -723,7 +1088,7 @@ class WearableViewer(QtWidgets.QWidget):
             self.set_status("Already recording")
             return
         
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ts = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
 
         fname, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
@@ -758,18 +1123,37 @@ class WearableViewer(QtWidgets.QWidget):
         self._rec_wall_t0 = time.perf_counter()
         self._csv_lines.clear()
 
-        # If saving-as-you-go, write header immediately.
+        # Reset ticking-clock writer state (single-device version of MultiWearable logic)
+        # Initialize ALL recording state BEFORE setting recording=True to avoid race conditions
+        with self._rec_lock:
+            self.rec_t_raw.clear()
+            for k in self.rec_data_raw:
+                self.rec_data_raw[k].clear()
+            # Set timestamp origin BEFORE recording flag (critical for thread safety)
+            self._t_rec0 = time.perf_counter()
+            self._rec_last_t = None
+            self._last_any_record_frame = self._t_rec0
+            self._write_cursor = 0
+            self._flush_counter = 0
+
+        # Set this outside lock to avoid deadlock with writer
+        self._csv_header_written = False
+
+        # If saving-as-you-go, write header immediately (placeholders finalized on stop)
         if self.record_incremental and self.record_file is not None:
             try:
-                self.record_file.write("# TinZr Wearable Recording (incremental)\n")
-                self.record_file.write(f"# DateTime: {datetime.now().isoformat()}\n")
-                self.record_file.write(f"# FixedFs_target_Hz: {self.record_fs:.6f}\n")
-                self.record_file.write("# Columns: time_s, red, ir, ax, ay, az, gx, gy, gz, hr_bpm, spo2_pct, batt_pct\n")
-                self.record_file.write("time_s,red,ir,ax,ay,az,gx,gy,gz,hr_bpm,spo2_pct,batt_pct\n")
-                self.record_file.flush()
+                self._write_header_placeholders()
             except Exception as e:
                 self.set_status(f"Recording header error: {e}")
 
+        # Start writer timer (handles NaN gaps + auto-stop)
+        try:
+            self.writer_timer.start()
+        except Exception:
+            pass
+
+        # Set recording flag LAST, after all state is initialized
+        # This ensures BLE thread will see complete initialization
         self.recording = True
         self.set_status(f"Recording → {fname} ({'incremental' if self.record_incremental else 'buffer+resample on stop'})")
 
@@ -788,27 +1172,46 @@ class WearableViewer(QtWidgets.QWidget):
         f = self.record_file
         self.record_file = None
 
-        # If we were writing incrementally, just flush remaining buffered lines and close.
+        # If we were writing incrementally (ticking-clock), write remaining rows, close, and finalize header.
         if self.record_incremental:
             try:
+                try:
+                    self.writer_timer.stop()
+                except Exception:
+                    pass
+
+                # write any remaining fixed-grid rows
+                self._write_available_rows(final=True)
+
+                # close file first
                 with self._rec_lock:
-                    if self._csv_lines:
-                        f.write("".join(self._csv_lines))
-                        self._csv_lines.clear()
-                    f.flush()
+                    try:
+                        f.flush()
+                    except Exception:
+                        pass
                 f.close()
-                self.set_status(f"Recording saved (incremental) → {self.record_path}")
+
+                # finalize header placeholders (Fs_orig, N_out)
+                try:
+                    self._finalize_csv_header(self.record_path)
+                except Exception:
+                    pass
+
+                self.set_status(f"Recording saved (ticking-clock) → {self.record_path}")
             except Exception as e:
                 try:
                     f.close()
                 except Exception:
                     pass
-                self.set_status(f"Recording error: {e}")
+                self.set_status(f"Recording stop error: {e}")
             finally:
-                # Clear rec buffers (not used for incremental, but keep consistent)
-                self.rec_idx_raw.clear()
-                for k in self.rec_data_raw:
-                    self.rec_data_raw[k].clear()
+                # reset writer state for next time
+                self._csv_header_written = False
+                self._t_rec0 = None
+                self._rec_last_t = None
+                self._last_any_record_frame = None
+                self._write_cursor = 0
+                self._flush_counter = 0
             return
 
 
@@ -922,11 +1325,48 @@ class WearableViewer(QtWidgets.QWidget):
         # Append new bytes to the rolling buffer
         self.byte_buf.extend(data)
 
+        # Debug telemetry: count BLE notifications
+        self._rx_packets += 1
+        self._last_rx_time = time.monotonic()
+
         n_bytes = len(self.byte_buf)
         n_frames = n_bytes // FRAME_SIZE
 
         if n_frames == 0:
             return
+
+        # Debug telemetry: count decoded frames
+        self._rx_frames += int(n_frames)
+
+        now = time.perf_counter()
+
+        # If recording, reconstruct per-sample timestamps within this BLE packet (BLE sends bursts)
+        t_rel_first = None
+        dt_samp = None
+        if self.recording:
+            # Defensive check: _t_rec0 should be set by on_start_recording_clicked(),
+            # but if recording flag was set without proper init, handle it here
+            if self._t_rec0 is None:
+                # This should be rare - indicates a race condition or bug elsewhere
+                with self._rec_lock:
+                    if self._t_rec0 is None:  # Double-check under lock
+                        self._t_rec0 = now
+                        self._last_any_record_frame = now
+                        self._rec_last_t = None
+
+            fs_now = float(self.fs_est) if (self.fs_est is not None and self.fs_est > 0) else float(FW_FS_HINT_HZ)
+            if fs_now <= 0:
+                fs_now = float(FW_FS_HINT_HZ)
+            dt_samp = 1.0 / fs_now
+
+            last_t = self._rec_last_t
+            if last_t is None:
+                # Back-date the burst so the LAST frame aligns closest to 'now'
+                t_rel_first = float(now - float(self._t_rec0)) - (n_frames - 1) * dt_samp
+                if t_rel_first < 0:
+                    t_rel_first = 0.0
+            else:
+                t_rel_first = float(last_t) + dt_samp
 
         for i in range(n_frames):
             start = i * FRAME_SIZE
@@ -974,47 +1414,37 @@ class WearableViewer(QtWidgets.QWidget):
 
             # ---- Recording buffers (for resampling later) ----
             if self.recording:
-                self.rec_idx_raw.append(self.sample_count)
-                self.rec_data_raw["ax"].append(ax)
-                self.rec_data_raw["ay"].append(ay)
-                self.rec_data_raw["az"].append(az)
-                self.rec_data_raw["gx"].append(gx)
-                self.rec_data_raw["gy"].append(gy)
-                self.rec_data_raw["gz"].append(gz)
-                self.rec_data_raw["red"].append(red)
-                self.rec_data_raw["ir"].append(ir)
-                self.rec_data_raw["hr"].append(float(hr_i))
-                self.rec_data_raw["spo2"].append(float(spo2_i))
-                self.rec_data_raw["batt"].append(float(batt_i))
-
-                # ---- Incremental CSV (save-as-you-go) ----
-                if self.record_incremental and self.record_file is not None:
-                    try:
-                        # Prefer sample-index / calibrated Fs when available; otherwise use wall-clock.
-                        if self.fs_est is not None and self.fs_est > 0 and self._rec_start_sample is not None:
-                            t_s = (self.sample_count - self._rec_start_sample) / float(self.fs_est)
-                        elif self._rec_wall_t0 is not None:
-                            t_s = time.perf_counter() - self._rec_wall_t0
-                        else:
-                            t_s = 0.0
-
-                        line = (
-                            f"{t_s:.6f},"
-                            f"{red:.6f},{ir:.6f},"
-                            f"{ax:.6f},{ay:.6f},{az:.6f},"
-                            f"{gx:.6f},{gy:.6f},{gz:.6f},"
-                            f"{float(hr_i):.2f},{float(spo2_i):.2f},{float(batt_i):.2f}\n"
-                        )
-
-                        with self._rec_lock:
-                            self._csv_lines.append(line)
-                            if len(self._csv_lines) >= int(self.csv_flush_every):
-                                self.record_file.write("".join(self._csv_lines))
-                                self._csv_lines.clear()
-                                self.record_file.flush()
-                    except Exception:
-                        # Don't crash BLE thread because of disk I/O
-                        pass
+                # Pre-compute values outside lock to minimize lock hold time
+                # reconstructed record-time for this sample (sec since record start)
+                if t_rel_first is not None and dt_samp is not None:
+                    t_rel = float(t_rel_first) + float(i) * float(dt_samp)
+                else:
+                    t_rel = float("nan")
+                
+                # Prepare all data first
+                new_data = {
+                    "ax": ax,
+                    "ay": ay,
+                    "az": az,
+                    "gx": gx,
+                    "gy": gy,
+                    "gz": gz,
+                    "red": red,
+                    "ir": ir,
+                    "hr": float(hr_i),
+                    "spo2": float(spo2_i),
+                    "batt": float(batt_i)
+                }
+                
+                # Single atomic update under lock
+                with self._rec_lock:
+                    self.rec_idx_raw.append(self.sample_count)
+                    self.rec_t_raw.append(t_rel)
+                    self._rec_last_t = t_rel
+                    self._last_any_record_frame = now
+                    # Append all channel data
+                    for key, value in new_data.items():
+                        self.rec_data_raw[key].append(value)
 
         # Drop consumed bytes
         remaining = n_bytes - n_frames * FRAME_SIZE
@@ -1047,6 +1477,9 @@ class WearableViewer(QtWidgets.QWidget):
     def update_plot(self):
         # HUD always updates from latest hr/spo2/batt
         self._update_hud()
+
+        # Debug telemetry row (once per second)
+        #self._update_debug_row()
 
         # Wait until we know the real device Fs
         if self.fs_est is None:
