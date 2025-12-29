@@ -12,7 +12,14 @@ It provides a clean, Boards-Manager-installable package so anyone can use your b
 
 ## 🚀 Quick Install
 
-### 1️⃣ Add the Boards Manager URL
+### 1️⃣ Install Espressif ESP32
+Open the Arduino IDE and go to:
+- Go to **Tools → Board → Boards Manager**
+- Find ``esp32 by Espressif Systems``
+- Install version 3.3.4
+
+
+### 2️⃣ Add the Boards Manager URL
 Open the Arduino IDE and go to:
 
 **File → Preferences → Additional Boards Manager URLs**, then paste:
@@ -21,16 +28,15 @@ Open the Arduino IDE and go to:
 https://ludvikalkhoury.github.io/TinZr/package_tinzr_index.json
 ```
 
-
 Click **OK**.
 
-### 2️⃣ Install the board package
+### 3️⃣ Install the board package
 In Arduino IDE:
 - Go to **Tools → Board → Boards Manager**
 - Search for **TinZr Boards**
 - Click **Install**
 
-### 3️⃣ Select your board
+### 4️⃣ Select your board
 Go to:
 
 **Tools → Board → TinZr Boards → TinZr ESP32-C3 Rev4**
