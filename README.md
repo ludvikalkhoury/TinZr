@@ -33,7 +33,7 @@ Click **OK**.
 ### 3️⃣ Install the board package
 In Arduino IDE:
 - Go to **Tools → Board → Boards Manager**
-- Search for **TinZr Boards**
+- Search for **TinZr**
 - Click **Install**
 
 ### 4️⃣ Select your board
@@ -63,6 +63,7 @@ void loop() {
   strip.setPixelColor(0, strip.Color(0, 255, 0)); strip.show(); delay(500);
   strip.setPixelColor(0, strip.Color(0, 0, 255)); strip.show(); delay(500);
 }
+
 
 
 
