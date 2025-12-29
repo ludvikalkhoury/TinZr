@@ -1,5 +1,4 @@
 #include "TinZrLED.h"
-#include <Adafruit_NeoPixel.h>
 
 // Expect PIN_RGB_LED in variant/config; fallback if not defined:
 #ifndef PIN_RGB_LED

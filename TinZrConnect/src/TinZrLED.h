@@ -1,6 +1,15 @@
 #pragma once
 #include <Arduino.h>
 
+// ======================================================
+// REQUIRED: Adafruit NeoPixel
+// ======================================================
+#if !__has_include(<Adafruit_NeoPixel.h>)
+	#error "Missing dependency: Adafruit NeoPixel. Install `Adafruit NeoPixel by Adafruit` via Arduino Library Manager."
+#endif
+
+#include <Adafruit_NeoPixel.h>
+
 // =============================
 // TinZrStatusLED
 //   High-level LED state machine
