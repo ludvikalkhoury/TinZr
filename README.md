@@ -16,7 +16,10 @@ It provides a clean, Boards-Manager-installable package so anyone can use your b
 Open the Arduino IDE and go to:
 - Go to **Tools → Board → Boards Manager**
 - Find ``esp32 by Espressif Systems``
-- Install version 3.3.4
+- Install *only* version `3.3.4`
+
+**⚠️ IMPORTANT: This project is tested and supported exclusively with ESP32 core version `3.3.4`.**  
+**Do NOT use any other version — builds may fail or behave incorrectly.**
 
 
 ### 2️⃣ Add the Boards Manager URL
@@ -63,6 +66,8 @@ void loop() {
   strip.setPixelColor(0, strip.Color(0, 255, 0)); strip.show(); delay(500);
   strip.setPixelColor(0, strip.Color(0, 0, 255)); strip.show(); delay(500);
 }
+```
+
 
 
 
