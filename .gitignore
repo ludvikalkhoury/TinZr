@@ -3,6 +3,7 @@
 .vscode
 .ipynb_*
 *.pptx
+__pycache__
 codes.txt
 TinZr_Logo_PPT.pptx
 .orig_docs

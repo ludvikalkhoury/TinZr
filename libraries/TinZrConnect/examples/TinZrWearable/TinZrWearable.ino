@@ -10,10 +10,10 @@ void setup() {
 
 	TinZrWearable.begin(cfg);
 
-	pinMode(20, OUTPUT);
-	pinMode(21, OUTPUT);
-	digitalWrite(20, LOW);
-	digitalWrite(21, LOW);
+	//pinMode(20, OUTPUT);
+	//pinMode(21, OUTPUT);
+	//digitalWrite(20, LOW);
+	//digitalWrite(21, LOW);
 
 	delay(10);
 

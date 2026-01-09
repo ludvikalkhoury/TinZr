@@ -2,30 +2,29 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+#if defined(ARDUINO)
 
-// ======================================================
-// REQUIRED SENSOR LIBRARIES
-// ======================================================
+// Arduino build: use normal includes so the Arduino dependency scanner works.
+#include <Adafruit_LSM6DS3TRC.h>
+#include <Adafruit_Sensor.h>
+#include <MAX30105.h>
 
-// ---------- Adafruit LSM6DS3TR-C ----------
+#else
+
+// Non-Arduino build: optional friendly diagnostics.
 #if !__has_include(<Adafruit_LSM6DS3TRC.h>)
-	#error "Missing dependency: Adafruit LSM6DS3TR-C. Install `Adafruit LSM6D by Adafruit` via Arduino Library Manager."
+  #error "Missing dependency: Adafruit LSM6DS3TR-C. Install `Adafruit LSM6D by Adafruit`."
 #endif
 
-
-// ---------- SparkFun MAX3010x ----------
 #if !__has_include(<MAX30105.h>)
-	#error "Missing dependency: MAX30105. Install `SparkFun MAX3010x Pulse and Proximity Sensor Library by SparkFun Electronics` via Arduino Library Manager."
+  #error "Missing dependency: MAX30105. Install `SparkFun MAX3010x Pulse and Proximity Sensor Library`."
 #endif
-
-// ======================================================
-// Safe includes (only reached if checks pass)
-// ======================================================
-
 
 #include <Adafruit_LSM6DS3TRC.h>
 #include <Adafruit_Sensor.h>
-#include "MAX30105.h"
+#include <MAX30105.h>
+
+#endif
 
 
 
