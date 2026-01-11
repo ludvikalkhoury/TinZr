@@ -18,6 +18,9 @@ bool TinZrBLEGatt::begin(const TinZrBLEConfig& cfg) {
 	return false;
 #else
 	BLEDevice::init(_cfg.device_name ? _cfg.device_name : "TinZr");
+	BLEDevice::setPower(ESP_PWR_LVL_P9);
+		
+	
 	if (_cfg.preferred_mtu > 0) {
 		BLEDevice::setMTU(_cfg.preferred_mtu);
 	}

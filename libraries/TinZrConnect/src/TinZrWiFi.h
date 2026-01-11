@@ -41,7 +41,7 @@ struct TinZrWiFiConfig {
 	uint8_t     max_retries       = 0;      // 0 = infinite
 
 	// RF tuning
-	wifi_power_t tx_power         = WIFI_POWER_8_5dBm;
+	wifi_power_t tx_power         = WIFI_POWER_13dBm; // this is a weaker, yet, safer options in case the 13 dBm gives a hard time: WIFI_POWER_8_5dBm;
 
 	// If true, force WiFi.config() even for DHCP path (some networks behave better)
 	bool        force_dhcp_config = true;
