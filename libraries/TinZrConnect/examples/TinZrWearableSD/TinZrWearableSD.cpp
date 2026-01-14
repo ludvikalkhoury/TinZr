@@ -2,6 +2,7 @@
 // TinZrWearableSD.cpp
 // ====================
 #include "TinZrWearableSD.h"
+#include <SD.h>
 #include <string.h>
 #include "TinZrLED.h"
 
@@ -446,13 +447,68 @@ void TinZrWearableSDClass::handle() {
 		TinZrLED.setMode(TinZrStatusLED::Mode::OFF);
 		return;
 	}
+	
 
 	// SD hot-plug recovery (keep FAIL_BLINK until card appears)
 	_probeSDHotplug(millis());
 
 	_handleBLE();
+
+#if TINZR_ENABLE_BLE
+	if (_sdListPending) {
+		_sdListPending = false;
+		if (_bleStarted && _ble.connected()) {
+			_sendSdList();
+		}
+	}
+#endif
+
+
+
+	_handleDeferredBleActions();
+	_pumpSdTransfer();
 	_handleStreaming();
 }
+
+
+
+
+void TinZrWearableSDClass::_handleDeferredBleActions() {
+#if !TINZR_ENABLE_BLE
+	return;
+#else
+	if (!_bleStarted || !_ble.connected()) return;
+
+	// BAT reply
+	if (_pendingBattReply) {
+		_pendingBattReply = false;
+
+		// ensure battery was sampled (forceBatteryUpdate sets timer to refresh)
+		// if you want immediate sample here:
+		sLastBattPct = read_battery_pct();
+
+		char msg[32];
+		snprintf(msg, sizeof(msg), "BAT:%u", (unsigned)sLastBattPct);
+		_ble.sendNotify((const uint8_t*)msg, strlen(msg));
+	}
+
+	// LS
+	if (_pendingSdList) {
+		_pendingSdList = false;
+		_sendSdList(); // this sends multiple notifies safely now
+	}
+
+	// GET
+	if (_pendingStartGet) {
+		_pendingStartGet = false;
+		String name = _pendingGetName;
+		_pendingGetName = "";
+		_startSdTransfer(name); // sends GET:BEGIN safely now
+	}
+#endif
+}
+
+
 
 // ===================== BLE ======================
 void TinZrWearableSDClass::_handleBLE() {
@@ -479,6 +535,234 @@ void TinZrWearableSDClass::_handleBLE() {
 }
 
 // ========== BLE write callback ==========
+
+
+uint32_t TinZrWearableSDClass::_crc32_bytes(const uint8_t* data, size_t len, uint32_t crc) {
+	// Standard CRC32 (Ethernet/ZIP), reflected poly 0xEDB88320
+	crc = ~crc;
+	for (size_t i = 0; i < len; ++i) {
+		crc ^= (uint32_t)data[i];
+		for (int k = 0; k < 8; ++k) {
+			uint32_t mask = -(crc & 1u);
+			crc = (crc >> 1) ^ (0xEDB88320u & mask);
+		}
+	}
+	return ~crc;
+}
+
+uint32_t TinZrWearableSDClass::_crc32_file(File& f) {
+	uint32_t crc = 0;
+	uint8_t buf[256];
+	while (f && f.available()) {
+		int n = f.read(buf, sizeof(buf));
+		if (n <= 0) break;
+		crc = _crc32_bytes(buf, (size_t)n, crc);
+	}
+	return crc;
+}
+
+
+
+
+
+void TinZrWearableSDClass::_sendSdList() {
+#if !TINZR_ENABLE_BLE
+	return;
+#else
+	if (!_bleStarted || !_ble.connected()) return;
+
+	// Always notify BEGIN/END so PC can unblock even on errors
+	auto notify_txt = [&](const char* s) {
+		_ble.sendNotify((const uint8_t*)s, strlen(s));
+	};
+
+	if (!_sdReady) {
+		Serial.println("LS: SD not ready");
+		notify_txt("LS:BEGIN");
+		delay(10);
+		notify_txt("LS:ERR|SD_NOT_READY");
+		delay(10);
+		notify_txt("LS:END");
+		return;
+	}
+
+	const char* dir = (_cfg.sd_log_dir && _cfg.sd_log_dir[0] != '\0') ? _cfg.sd_log_dir : TINZR_SD_LOG_DIR;
+
+	Serial.print("LS dir = ");
+	Serial.println(dir);
+
+	notify_txt("LS:BEGIN");
+	delay(15); // IMPORTANT: give BEGIN time to land
+
+	File d = SD.open(dir, FILE_READ);
+	if (!d) {
+		Serial.println("LS: open dir failed");
+		notify_txt("LS:ERR|OPEN_FAILED");
+		delay(10);
+		notify_txt("LS:END");
+		return;
+	}
+
+	if (!d.isDirectory()) {
+		Serial.println("LS: path is not a directory");
+		notify_txt("LS:ERR|NOT_A_DIR");
+		d.close();
+		delay(10);
+		notify_txt("LS:END");
+		return;
+	}
+
+	int count = 0;
+
+	for (;;) {
+		File f = d.openNextFile();
+		if (!f) break;
+
+		if (!f.isDirectory()) {
+			String name = String(f.name());
+			int slash = name.lastIndexOf('/');
+			if (slash >= 0) name = name.substring(slash + 1);
+
+			String line = String("LS:") + name + String("|") + String((unsigned long)f.size());
+
+			// Debug print (so you can confirm begin/lines/end timing)
+			Serial.println(line);
+
+			_ble.sendNotify((const uint8_t*)line.c_str(), line.length());
+
+			// Pacing: prevents notify drops on Windows/WinRT stacks
+			delay(15);
+
+			count++;
+		}
+		f.close();
+	}
+
+	d.close();
+
+	Serial.print("LS: sent files = ");
+	Serial.println(count);
+
+	delay(15);
+	notify_txt("LS:END");
+#endif
+}
+
+
+
+
+
+
+void TinZrWearableSDClass::_startSdTransfer(const String& name) {
+	if (!_sdReady) return;
+
+	// Stop any previous transfer
+	if (_sdXferActive) {
+		_sdXferActive = false;
+		_sdXferWaitingAck = false;
+		if (_sdXferFile) _sdXferFile.close();
+	}
+
+	const char* dir = (_cfg.sd_log_dir && _cfg.sd_log_dir[0] != '\0') ? _cfg.sd_log_dir : TINZR_SD_LOG_DIR;
+
+	String path = String(dir);
+	if (!path.endsWith("/")) path += "/";
+	String clean = name;
+	while (clean.startsWith("/")) clean = clean.substring(1);
+	path += clean;
+
+	File f = SD.open(path.c_str(), FILE_READ);
+	if (!f) {
+		Serial.println("GET: open failed");
+		return;
+	}
+
+	// Compute CRC32 upfront, then reopen so we can stream from the beginning.
+	uint32_t crc = _crc32_file(f);
+	size_t size = (size_t)f.size();
+	f.close();
+
+	f = SD.open(path.c_str(), FILE_READ);
+	if (!f) return;
+
+	_sdXferActive = true;
+	_sdXferWaitingAck = false;
+	_sdXferSeq = 0;
+	_sdXferLastSeqSent = 0;
+	_sdXferName = clean;
+	_sdXferFile = f;
+	_sdXferFileCrc32 = crc;
+	_sdXferFileSize = size;
+	_sdXferLastLen = 0;
+
+#if TINZR_ENABLE_BLE
+	if (_bleStarted && _ble.connected()) {
+		char hdr[96];
+		snprintf(hdr, sizeof(hdr), "GET:BEGIN|%s|%lu|%08lX", clean.c_str(), (unsigned long)size, (unsigned long)crc);
+		_ble.sendNotify((const uint8_t*)hdr, strlen(hdr));
+	}
+#endif
+}
+
+void TinZrWearableSDClass::_pumpSdTransfer() {
+#if !TINZR_ENABLE_BLE
+	return;
+#else
+	if (!_sdXferActive) return;
+	if (!_bleStarted || !_ble.connected()) return;
+
+	// If waiting for ACK, do nothing.
+	if (_sdXferWaitingAck) return;
+
+	if (!_sdXferFile) {
+		_sdXferActive = false;
+		_sdXferWaitingAck = false;
+#if TINZR_ENABLE_BLE
+		if (_bleStarted && _ble.connected()) {
+			char endmsg[48];
+			snprintf(endmsg, sizeof(endmsg), "GET:END|%08lX", (unsigned long)_sdXferFileCrc32);
+			_ble.sendNotify((const uint8_t*)endmsg, strlen(endmsg));
+		}
+#endif
+		return;
+	}
+
+	uint8_t payload[180];
+	int n = _sdXferFile.read(payload, sizeof(payload));
+	if (n <= 0) {
+		_sdXferFile.close();
+		return; // next pump will send GET:END
+	}
+
+	uint32_t crc = _crc32_bytes(payload, (size_t)n, 0);
+
+	// Build packet: 'D' + seq(u16) + len(u16) + crc32(u32) + payload
+	uint8_t pkt[1 + 2 + 2 + 4 + 180];
+	size_t off = 0;
+	pkt[off++] = (uint8_t)'D';
+	pkt[off++] = (uint8_t)(_sdXferSeq & 0xFF);
+	pkt[off++] = (uint8_t)((_sdXferSeq >> 8) & 0xFF);
+	pkt[off++] = (uint8_t)((uint16_t)n & 0xFF);
+	pkt[off++] = (uint8_t)(((uint16_t)n >> 8) & 0xFF);
+	pkt[off++] = (uint8_t)(crc & 0xFF);
+	pkt[off++] = (uint8_t)((crc >> 8) & 0xFF);
+	pkt[off++] = (uint8_t)((crc >> 16) & 0xFF);
+	pkt[off++] = (uint8_t)((crc >> 24) & 0xFF);
+	memcpy(pkt + off, payload, (size_t)n);
+	off += (size_t)n;
+
+	// cache last packet for resend
+	_sdXferLastSeqSent = _sdXferSeq;
+	_sdXferLastLen = (uint16_t)n;
+	memcpy(_sdXferLastPayload, payload, (size_t)n);
+
+	_ble.sendNotify(pkt, off);
+
+	_sdXferWaitingAck = true;
+	_sdXferSeq++;
+#endif
+}
+
 void TinZrWearableSDClass::_bleWriteStatic(const uint8_t* data, size_t len) {
 	if (!_self || !data || len == 0) return;
 	_self->_handleBleCommand(data, len);
@@ -498,13 +782,61 @@ void TinZrWearableSDClass::_handleBleCommand(const uint8_t* data, size_t len) {
 
 	if (s.equalsIgnoreCase("BAT")) {
 		forceBatteryUpdate();
-		char msg[32];
-		snprintf(msg, sizeof(msg), "BAT:%u", (unsigned)sLastBattPct);
-#if TINZR_ENABLE_BLE
-		if (_bleStarted && _ble.connected()) {
-			_ble.sendNotify((const uint8_t*)msg, strlen(msg));
+		_pendingBattReply = true;   // defer actual notify
+		return;
+	}
+
+	if (s.equalsIgnoreCase("LS")) {
+		_sdListPending = true;
+		return;
+	}
+
+	if (s.startsWith("GET:") || s.startsWith("get:")) {
+		String name = s.substring(4);
+		name.trim();
+		if (name.length()) {
+			_pendingGetName = name;
+			_pendingStartGet = true; // defer start (which notifies GET:BEGIN)
 		}
+		return;
+	}
+
+	if (s.startsWith("ACK:") || s.startsWith("ack:")) {
+		String v = s.substring(4);
+		v.trim();
+		uint16_t seq = (uint16_t)v.toInt();
+		if (_sdXferActive && _sdXferWaitingAck && seq == _sdXferLastSeqSent) {
+			_sdXferWaitingAck = false;
+		}
+		return;
+	}
+
+	if (s.startsWith("NAK:") || s.startsWith("nak:")) {
+		String v = s.substring(4);
+		v.trim();
+		uint16_t seq = (uint16_t)v.toInt();
+		if (_sdXferActive && _sdXferWaitingAck && seq == _sdXferLastSeqSent) {
+			// resend last payload with same seq
+			uint32_t crc = _crc32_bytes(_sdXferLastPayload, (size_t)_sdXferLastLen, 0);
+			uint8_t pkt[1 + 2 + 2 + 4 + 200];
+			size_t off = 0;
+			pkt[off++] = (uint8_t)'D';
+			pkt[off++] = (uint8_t)(seq & 0xFF);
+			pkt[off++] = (uint8_t)((seq >> 8) & 0xFF);
+			pkt[off++] = (uint8_t)(_sdXferLastLen & 0xFF);
+			pkt[off++] = (uint8_t)((_sdXferLastLen >> 8) & 0xFF);
+			pkt[off++] = (uint8_t)(crc & 0xFF);
+			pkt[off++] = (uint8_t)((crc >> 8) & 0xFF);
+			pkt[off++] = (uint8_t)((crc >> 16) & 0xFF);
+			pkt[off++] = (uint8_t)((crc >> 24) & 0xFF);
+			memcpy(pkt + off, _sdXferLastPayload, (size_t)_sdXferLastLen);
+			off += (size_t)_sdXferLastLen;
+#if TINZR_ENABLE_BLE
+			if (_bleStarted && _ble.connected()) {
+				_ble.sendNotify(pkt, off);
+			}
 #endif
+		}
 		return;
 	}
 

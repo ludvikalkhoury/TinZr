@@ -66,6 +66,14 @@ private:
 	uint32_t _sampleIdx 					= 0;
 
 
+	// --- deferred BLE actions (do NOT notify inside onWrite) ---
+	volatile bool _pendingSdList = false;
+	volatile bool _pendingBattReply = false;
+	volatile bool _pendingStartGet = false;
+
+	String _pendingGetName;
+
+
 	// Store the *string* timestamp from X: for filename + header
 	String   _pcAnchorStr         = "";
 	bool     _hasPcAnchorStr      = false;
@@ -85,6 +93,7 @@ private:
 	void _handleBleCommand(const uint8_t* data, size_t len);
 
 	void _handleBLE();
+	void _handleDeferredBleActions();
 	void _handleStreaming();
 	void _applyStreamingChange(bool enable);
 
@@ -93,6 +102,29 @@ private:
 
 	// NEW: write metadata header + csv header (called once per log open)
 	void _writeLogHeaders(const String& file_base);
+
+
+// =========================
+// SD retrieval over BLE (verified transfer)
+// =========================
+void _sendSdList();
+void _startSdTransfer(const String& name);
+void _pumpSdTransfer();
+uint32_t _crc32_file(File& f);
+uint32_t _crc32_bytes(const uint8_t* data, size_t len, uint32_t crc);
+
+bool     _sdXferActive      = false;
+bool     _sdXferWaitingAck  = false;
+uint16_t _sdXferSeq         = 0;
+uint16_t _sdXferLastSeqSent = 0;
+String   _sdXferName;
+File     _sdXferFile;
+uint32_t _sdXferFileCrc32   = 0;
+size_t   _sdXferFileSize    = 0;
+uint8_t  _sdXferLastPayload[200];
+uint16_t _sdXferLastLen     = 0;
+volatile bool _sdListPending = false;
+
 
 	// LED
 	void _updateLED();
