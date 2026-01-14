@@ -43,6 +43,8 @@ CMD_EXP_META_PREFIX = "X:"
 HEARTBEAT_PERIOD_S = 5.0
 BATT_POLL_MS = 10 * 60 * 1000
 
+STATUS_FIXED_CHARS = 45   # pick what looks good (60–90 usually)
+
 __VERSION__ = "V1.0.0"
 
 # =========================
@@ -96,6 +98,14 @@ class DeviceRow(QtWidgets.QFrame):
 
 		lbl_connect = QtWidgets.QLabel("Connect")
 		self.toggle_connect = ToggleSwitch()
+		self.toggle_connect._thumb_radius = 10
+		self.toggle_connect._track_radius = 10
+		self.toggle_connect._margin = 3
+		self.toggle_connect._width = 45
+		self.toggle_connect._height = 25
+		self.toggle_connect.setFixedSize(self.toggle_connect._width, self.toggle_connect._height)
+		self.toggle_connect.update()
+		
 		self.toggle_connect.setChecked(False)
 		self.toggle_connect.toggled.connect(lambda checked: self.connect_toggled.emit(self.addr, checked))
 
@@ -103,7 +113,7 @@ class DeviceRow(QtWidgets.QFrame):
 		lay.addWidget(self.toggle_connect, 0, QtCore.Qt.AlignVCenter)
 
 		self.btn_remove = QtWidgets.QPushButton("✕")
-		self.btn_remove.setFixedSize(28, 28)
+		self.btn_remove.setFixedSize(22, 22)
 		self.btn_remove.setToolTip("Remove device")
 		self.btn_remove.setStyleSheet(
 			"QPushButton{font-weight:700; border-radius:8px; padding:0px; }"
@@ -151,6 +161,7 @@ class SDRetrieveDialog(QtWidgets.QDialog):
 		self.setWindowTitle("Retrieve from SD")
 		self.setModal(True)
 		self.resize(560, 420)
+		self.setFixedSize(self.size()) 
 
 		self._get_connected_devices = get_connected_devices_cb
 		self._refresh_cb = refresh_cb
@@ -246,6 +257,9 @@ class SDRetrieveDialog(QtWidgets.QDialog):
 
 	@QtCore.pyqtSlot(str)
 	def _ui_replace_last_two_lines(self, block: str):
+		# UI thread: safe to touch widgets here
+		self._ensure_progress_tail()
+
 		sb = self.txt.verticalScrollBar()
 		was_at_bottom = self._is_at_bottom()
 		old_value = sb.value()
@@ -270,8 +284,8 @@ class SDRetrieveDialog(QtWidgets.QDialog):
 
 		self._restore_scroll(was_at_bottom, old_value)
 
+
 	def log_tqdm_2line(self, filename: str, line2: str):
-		self._ensure_progress_tail()
 		block = f"{filename}\n{line2}"
 		self.sig_replace_tail.emit(block)
 
@@ -460,6 +474,19 @@ class TinZrWearableSD(QtWidgets.QWidget):
 
 		self.scan_finished.connect(self._on_scan_finished)
 
+
+
+	def _fit_status(self, s: str, width: int = STATUS_FIXED_CHARS) -> str:
+		s = (s or "").replace("\n", " ").replace("\r", " ")
+		if len(s) <= width:
+			# pad so the label width stays visually stable (optional)
+			return s.ljust(width)
+		# truncate and add ellipsis
+		if width <= 1:
+			return s[:width]
+		return s[:width-1] + "…"
+
+
 	def _resolve_future_threadsafe(self, fut, value=None, exc: Exception = None):
 		if fut is None:
 			return
@@ -497,7 +524,8 @@ class TinZrWearableSD(QtWidgets.QWidget):
 
 	@QtCore.pyqtSlot(str)
 	def _ui_set_status(self, text: str):
-		self.label_status.setText(f"Status: {text}")
+		fixed = self._fit_status(text)
+		self.label_status.setText(f"Status: {fixed}")
 
 	@QtCore.pyqtSlot(bool, bool)
 	def _ui_set_record_toggle(self, checked: bool, enabled: bool):
@@ -636,8 +664,9 @@ class TinZrWearableSD(QtWidgets.QWidget):
 		self.label_status = QtWidgets.QLabel("Status: Idle")
 		self.label_hb = QtWidgets.QLabel("Sync. trigger: —")
 		self.label_status.setStyleSheet("font-size: 9pt; color: #A8B3CF;")
+		self.label_status.setTextFormat(QtCore.Qt.PlainText)
 		self.label_hb.setStyleSheet("font-size: 9pt; color: #A8B3CF;")
-
+		
 		ctrl_layout.addWidget(self.label_status, row, 0, 1, 3)
 		ctrl_layout.addWidget(self.label_hb, row, 3, 1, 2)
 
