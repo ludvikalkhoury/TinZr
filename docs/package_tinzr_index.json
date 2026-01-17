@@ -11,12 +11,12 @@
           "architecture": "esp32",
           "version": "1.0.0",
           "category": "Contributed",
-          "url": "https://github.com/ludvikalkhoury/TinZr/releases/download/1.0.0/tinzr-esp32c3-rev4-1.0.0.zip",
-          "archiveFileName": "tinzr-esp32c3-rev4-1.0.0.zip",
-          "checksum": "SHA-256:C0D5D9082E91D461A668F9C67FC0A2DCEABECB4A8D70EA80382E056485A5DE09",
+          "url": "https://github.com/ludvikalkhoury/TinZr/releases/download/1.0.0/tinzr-esp32c3-rev5-1.0.0.zip",
+          "archiveFileName": "tinzr-esp32c3-rev5-1.0.0.zip",
+          "checksum": "SHA-256:75849722F4461355BD535C9B42A65394738E2B8CDEE011C91B49531FB4A0C6CE",
           "size": "20617190",
           "boards": [
-            { "name": "TinZr ESP32-C3 Rev4" }
+            { "name": "TinZr ESP32-C3 Rev5" }
           ]
         }
       ],
