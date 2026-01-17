@@ -44,7 +44,27 @@ Go to:
 
 **Tools → Board → TinZr Boards → TinZr ESP32-C3 Rev4**
 
----
+
+## 5️⃣ Install `TinZrConnect` as a Zipped Arduino Library
+### A) Create the ZIP (IMPORTANT: zip the *library folder*, not the whole TinZr repo)
+- Navigate to the `libraries` directory. There you will find the `TinZrConnect` folder (the one that contains `library.properties`).
+- Create a zipped version of the `TinZrConnect` folder, and name it `TinZrConnect.zip`.
+
+### B) Install the ZIP in Arduino IDE
+1. In Arduino IDE, go to:
+   - **Sketch → Include Library → Add .ZIP Library…**
+2. Select `TinZrConnect.zip`
+3. Wait for the confirmation message (bottom status bar).
+
+### C) Verify Installation
+1. Go to:
+   - **File → Examples**
+2. Scroll to find:
+   - **TinZrConnect**
+3. Open an example sketch and compile.
+
+If you see the examples and the sketch compiles, the library is installed correctly ✅
+
 
 ## 💡 Example Sketch (NeoPixel Test)
 
@@ -64,6 +84,7 @@ void loop() {
     TinZrLED.setColor(0,0,255); delay(500);
 }
 ```
+
 
 
 
