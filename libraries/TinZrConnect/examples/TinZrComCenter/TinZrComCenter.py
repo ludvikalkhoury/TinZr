@@ -3,9 +3,8 @@ import os
 import sys
 from PyQt5 import QtWidgets, QtGui
 
-from tab_wifi_hub import WifiHubTab
-from tab_ble_hub import BleHubTab
-from tab_commands import CommandsTab   
+from gui.tab_wifi_hub import WifiHubTab
+from gui.tab_commands import CommandsTab   
 
 # Use your shared visual style
 try:
@@ -55,12 +54,10 @@ class TinZrComCenterApp(QtWidgets.QMainWindow):
 
         # Create tabs (same logic: app=self so they can call back if needed)
         self.tab_wifi_hub = WifiHubTab(app=self)
-        self.tab_ble_hub = BleHubTab(app=self)
         self.tab_commands = CommandsTab(app=self)
 
         # Add tabs
         self.notebook.addTab(self.tab_wifi_hub, "WIFI Hub")
-        self.notebook.addTab(self.tab_ble_hub, "BLE Hub")
         self.notebook.addTab(self.tab_commands, "Commands")
 
         # Apply TinZr theme if available
