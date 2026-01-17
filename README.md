@@ -49,24 +49,22 @@ Go to:
 ## 💡 Example Sketch (NeoPixel Test)
 
 ```cpp
-#include <Adafruit_NeoPixel.h>
+#include <Arduino.h>
+#include "TinZrCore.h" // this library declares TinZrCore TinZr
+#include "TinZrLED.h"  // this library declares TinZrStatusLED TinZrLED
 
-#define NUM_LEDS 1
-Adafruit_NeoPixel strip(NUM_LEDS, PIN_RGB_LED, NEO_GRB + NEO_KHZ800);
 
 void setup() {
-  Serial.begin(115200);
-  strip.begin();
-  strip.setBrightness(128);
-  strip.show();
+    TinZr.begin(25); //LED brightness is 25
 }
 
 void loop() {
-  strip.setPixelColor(0, strip.Color(255, 0, 0)); strip.show(); delay(500);
-  strip.setPixelColor(0, strip.Color(0, 255, 0)); strip.show(); delay(500);
-  strip.setPixelColor(0, strip.Color(0, 0, 255)); strip.show(); delay(500);
+    TinZrLED.setColor(255,0,0); delay(500);
+    TinZrLED.setColor(0,255,0); delay(500);
+    TinZrLED.setColor(0,0,255); delay(500);
 }
 ```
+
 
 
 
