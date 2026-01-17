@@ -310,8 +310,8 @@ bool TinZrCore::ppgRead(TinZrPpgSample& out) {
 	return true;
 }
 
-bool TinZrCore::readImuPpg(TinZrImuSample& imu, TinZrPpgSample& ppg, bool& gotPpg) {
-	bool okImu = imuReadRaw(imu);
+bool TinZrCore::readImuPpg(TinZrImuSampleSI& imu, TinZrPpgSample& ppg, bool& gotPpg) {
+	bool okImu = imuReadSI(imu);
 	gotPpg = ppgRead(ppg);
 	return okImu;
 }

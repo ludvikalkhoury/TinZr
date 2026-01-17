@@ -4,6 +4,7 @@ import asyncio
 import threading
 from datetime import datetime
 import zlib
+import time
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 from bleak import BleakScanner, BleakClient
@@ -43,14 +44,15 @@ CMD_EXP_META_PREFIX = "X:"
 HEARTBEAT_PERIOD_S = 5.0
 BATT_POLL_MS = 10 * 60 * 1000
 
-STATUS_FIXED_CHARS = 45   # pick what looks good (60–90 usually)
+STATUS_FIXED_CHARS = 45
 
 __VERSION__ = "V1.0.0"
 
 # =========================
 # DEBUG OPTIONS
 # =========================
-DEBUG_PRINT_ALL_NOTIFIES = True
+# IMPORTANT: printing every notify / ack will make Qt look "frozen".
+DEBUG_PRINT_ALL_NOTIFIES = False
 DEBUG_DUMP_SERVICES_ON_CONNECT = True
 
 
@@ -105,7 +107,7 @@ class DeviceRow(QtWidgets.QFrame):
 		self.toggle_connect._height = 25
 		self.toggle_connect.setFixedSize(self.toggle_connect._width, self.toggle_connect._height)
 		self.toggle_connect.update()
-		
+
 		self.toggle_connect.setChecked(False)
 		self.toggle_connect.toggled.connect(lambda checked: self.connect_toggled.emit(self.addr, checked))
 
@@ -151,9 +153,8 @@ class DeviceRow(QtWidgets.QFrame):
 class SDRetrieveDialog(QtWidgets.QDialog):
 	sig_log = QtCore.pyqtSignal(str)
 	sig_progress = QtCore.pyqtSignal(int, str)
-
-	# thread-safe UI tail replace
 	sig_replace_tail = QtCore.pyqtSignal(str)
+	sig_tail_2lines = QtCore.pyqtSignal(str, str)
 
 	def __init__(self, parent, get_connected_devices_cb, refresh_cb, download_cb):
 		super().__init__(parent)
@@ -161,11 +162,16 @@ class SDRetrieveDialog(QtWidgets.QDialog):
 		self.setWindowTitle("Retrieve from SD")
 		self.setModal(True)
 		self.resize(560, 420)
-		self.setFixedSize(self.size()) 
+		self.setFixedSize(self.size())
 
 		self._get_connected_devices = get_connected_devices_cb
 		self._refresh_cb = refresh_cb
 		self._download_cb = download_cb
+
+		# stable tail region marker (character position)
+		self._tail_start_pos = None
+		self._last_tail_filename = ""
+		self._tail_frozen = False
 
 		lay = QtWidgets.QVBoxLayout(self)
 		lay.setContentsMargins(14, 14, 14, 14)
@@ -201,6 +207,7 @@ class SDRetrieveDialog(QtWidgets.QDialog):
 
 		bottom.addStretch(1)
 
+		# Green bar = overall file-count progress (NOT bytes)
 		self.progress = QtWidgets.QProgressBar()
 		self.progress.setRange(0, 100)
 		self.progress.setValue(0)
@@ -229,13 +236,61 @@ class SDRetrieveDialog(QtWidgets.QDialog):
 		self.txt.setReadOnly(True)
 		self.txt.setFixedHeight(110)
 		self.txt.setStyleSheet("font-family: monospace; font-size: 9pt; color: #B8C3E0;")
+		self.txt.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
 		lay.addWidget(self.txt)
 
 		self.sig_log.connect(self._ui_append_log)
 		self.sig_progress.connect(self._ui_set_progress)
-		self.sig_replace_tail.connect(self._ui_replace_last_two_lines)
+		self.sig_tail_2lines.connect(self._queue_tail_2lines)
 
 		self._populate_devices()
+		
+		self._tail_block1 = None  # QTextBlock
+		self._tail_block_no = None
+		self._pending_tail = None  # (line1, line2)
+
+		self._tail_timer = QtCore.QTimer(self)
+		self._tail_timer.setInterval(1000)  # 1 Hz UI paint
+		self._tail_timer.timeout.connect(self._flush_tail_pending)
+		self._tail_timer.start()
+
+				
+		
+	@QtCore.pyqtSlot(str, str)
+	def _queue_tail_2lines(self, line1: str, line2: str):
+		# Called via signal (thread-safe). Just store latest.
+		self._pending_tail = (line1, line2)
+
+	def _flush_tail_pending(self):
+		if self._tail_frozen:
+			return
+		if not self._pending_tail:
+			return
+		line1, line2 = self._pending_tail
+		self._pending_tail = None
+		# Now do the actual overwrite (your existing method)
+		self._ui_set_tail_2lines(line1, line2)
+
+	
+	def _ensure_2line_tail(self):
+		doc = self.txt.document()
+
+		# If we already have a block number, verify it's still valid and still has a next block
+		if self._tail_block_no is not None:
+			b1 = doc.findBlockByNumber(int(self._tail_block_no))
+			if b1.isValid() and b1.next().isValid():
+				return
+
+		# Create two placeholder lines once, at the END
+		self.txt.appendPlainText("")  # filename line
+		self.txt.appendPlainText("")  # progress line
+
+		# After appending, cache the filename block number (2nd-to-last)
+		b2 = doc.lastBlock()
+		b1 = b2.previous()
+		self._tail_block_no = b1.blockNumber()
+
+
 
 	def _is_at_bottom(self) -> bool:
 		sb = self.txt.verticalScrollBar()
@@ -249,45 +304,46 @@ class SDRetrieveDialog(QtWidgets.QDialog):
 			sb.setValue(old_value)
 
 	def _ensure_progress_tail(self):
-		if getattr(self, "_has_progress_tail", False):
+		if self._tail_start_pos is not None:
 			return
-		self.txt.appendPlainText("")
-		self.txt.appendPlainText("")
-		self._has_progress_tail = True
+		self.txt.appendPlainText("")  # separator
+		doc = self.txt.document()
+		self._tail_start_pos = doc.characterCount() - 1
 
-	@QtCore.pyqtSlot(str)
-	def _ui_replace_last_two_lines(self, block: str):
-		# UI thread: safe to touch widgets here
-		self._ensure_progress_tail()
+	@QtCore.pyqtSlot(str, str)
+	def _ui_set_tail_2lines(self, line1: str, line2: str):
+		if self._tail_frozen:
+			return
+
+		self._ensure_2line_tail()
 
 		sb = self.txt.verticalScrollBar()
 		was_at_bottom = self._is_at_bottom()
 		old_value = sb.value()
 
 		doc = self.txt.document()
-		if doc.blockCount() < 2:
-			self.txt.appendPlainText("")
-			self.txt.appendPlainText("")
+		b1 = doc.findBlockByNumber(int(self._tail_block_no))
+		if (not b1.isValid()) or (not b1.next().isValid()):
+			self._tail_block_no = None
+			self._ensure_2line_tail()
+			b1 = doc.findBlockByNumber(int(self._tail_block_no))
 
-		last = doc.lastBlock()
-		second_last = last.previous() if last.previous().isValid() else last
-		start_pos = second_last.position()
+		b2 = b1.next()
 
 		cur = QtGui.QTextCursor(doc)
-		cur.setPosition(start_pos)
-		cur.movePosition(
-			QtGui.QTextCursor.MoveOperation.End,
-			QtGui.QTextCursor.MoveMode.KeepAnchor
-		)
+		cur.setPosition(b1.position())
+		cur.setPosition(b2.position() + b2.length() - 1, QtGui.QTextCursor.KeepAnchor)
 		cur.removeSelectedText()
-		cur.insertText(block)
+		cur.insertText(f"{line1}\n{line2}")
 
 		self._restore_scroll(was_at_bottom, old_value)
 
 
+
+
 	def log_tqdm_2line(self, filename: str, line2: str):
-		block = f"{filename}\n{line2}"
-		self.sig_replace_tail.emit(block)
+		self._last_tail_filename = filename or ""
+		self.sig_tail_2lines.emit(filename, line2)
 
 	def showEvent(self, event):
 		super().showEvent(event)
@@ -307,8 +363,8 @@ class SDRetrieveDialog(QtWidgets.QDialog):
 			self.progress.setValue(max(0, min(100, int(pct))))
 		except Exception:
 			pass
-		if msg:
-			self.txt.appendPlainText(str(msg))
+
+
 
 	def _populate_devices(self):
 		self.combo.clear()
@@ -402,8 +458,10 @@ class SDRetrieveDialog(QtWidgets.QDialog):
 		self.btn_refresh.setEnabled(False)
 		self.btn_download.setEnabled(False)
 		self.progress.setValue(0)
+		self._tail_frozen = False
 
 		def progress_cb(pct: int, msg: str = ""):
+			# pct here is overall progress by file-count
 			self._set_progress(pct, "")
 
 		async def _go():
@@ -415,9 +473,14 @@ class SDRetrieveDialog(QtWidgets.QDialog):
 			try:
 				fut.result()
 				self.progress.setValue(100)
-				self.log("Done.")
+
+				fn = self._last_tail_filename or (names[0] if names else "file")
+				self._tail_frozen = True
+				self.sig_replace_tail.emit(f"{fn}\nDone.")
 			except Exception as e:
-				self.log(f"Download failed: {e}")
+				fn = self._last_tail_filename or (names[0] if names else "file")
+				self._tail_frozen = True
+				self.sig_replace_tail.emit(f"{fn}\nDownload failed: {e}")
 
 		fut = self.parent()._run_coro(_go())
 
@@ -426,6 +489,7 @@ class SDRetrieveDialog(QtWidgets.QDialog):
 
 		def _check_dl():
 			if fut.done():
+				print("DL FUT DONE EARLY?", fut.done(), "exception:", fut.exception())
 				self._poll_timer_dl.stop()
 				self._poll_timer_dl.deleteLater()
 				_done(fut)
@@ -458,9 +522,9 @@ class TinZrWearableSD(QtWidgets.QWidget):
 		self.devices = {}
 		self._logging_armed = False
 
-		self._sd_ls_buffers = {}   # addr -> list[str]
-		self._sd_ls_futures = {}   # addr -> asyncio.Future
-		self._sd_xfer = {}         # addr -> dict(state)
+		self._sd_ls_buffers = {}
+		self._sd_ls_futures = {}
+		self._sd_xfer = {}
 
 		self._build_ui()
 		self._start_async_loop_thread()
@@ -474,18 +538,13 @@ class TinZrWearableSD(QtWidgets.QWidget):
 
 		self.scan_finished.connect(self._on_scan_finished)
 
-
-
 	def _fit_status(self, s: str, width: int = STATUS_FIXED_CHARS) -> str:
 		s = (s or "").replace("\n", " ").replace("\r", " ")
 		if len(s) <= width:
-			# pad so the label width stays visually stable (optional)
 			return s.ljust(width)
-		# truncate and add ellipsis
 		if width <= 1:
 			return s[:width]
 		return s[:width-1] + "…"
-
 
 	def _resolve_future_threadsafe(self, fut, value=None, exc: Exception = None):
 		if fut is None:
@@ -553,12 +612,71 @@ class TinZrWearableSD(QtWidgets.QWidget):
 	@QtCore.pyqtSlot(bool)
 	def _ui_enable_sd_retrieve(self, enabled: bool):
 		self.btn_retrieve_sd.setEnabled(bool(enabled))
+	
+	@QtCore.pyqtSlot(str)
+	def _ui_remove_device_row(self, addr: str):
+		# GUI-thread safe removal of the card + dict entry
+		info = self.devices.get(addr)
+		if not info:
+			return
 
+		row = info.get("row")
+		if row:
+			try:
+				row.setParent(None)
+				row.deleteLater()
+			except Exception:
+				pass
+
+		self.devices.pop(addr, None)
+
+	@QtCore.pyqtSlot()
+	def _ui_force_logging_off(self):
+		# GUI-thread: reflect "logging is OFF"
+		self._stop_logging_ui_state()
+
+	
+	
+	
 	def _set_status(self, text: str):
 		self._invoke(self, "_ui_set_status", str(text))
 
 	def _log(self, msg: str):
 		self._set_status(msg)
+	
+	async def _handle_ble_disconnect(self, addr: str, why: str = "lost"):
+		# Called in the asyncio thread (safe to await BLE ops)
+		alias = (self.devices.get(addr) or {}).get("alias", addr)
+
+		# IMPORTANT: switch off logging globally (per your request)
+		if self._logging_armed:
+			try:
+				await self._send_cmd_all(CMD_STOP)  # stop remaining devices too
+			except Exception:
+				pass
+			self._logging_armed = False
+			self._stop_heartbeat_ui()
+			self._invoke(self, "_ui_force_logging_off")
+
+		# Remove device from UI + model
+		self._invoke(self, "_ui_remove_device_row", addr)
+
+		# If nothing left connected, disable SD retrieve etc.
+		if not self._any_connected():
+			self._invoke(self, "_ui_enable_sd_retrieve", False)
+
+		self._log(f"Disconnected ({why}): {alias} — removed from list.")
+
+
+	# =========================
+	# CRC32 file helper (disk verification)
+	# =========================
+	def _crc32_file(self, path: str) -> int:
+		crc = 0
+		with open(path, "rb") as f:
+			for chunk in iter(lambda: f.read(64 * 1024), b""):
+				crc = zlib.crc32(chunk, crc)
+		return crc & 0xFFFFFFFF
 
 	# =========================
 	# UI
@@ -611,7 +729,6 @@ class TinZrWearableSD(QtWidgets.QWidget):
 		self.btn_add.setCursor(QtCore.Qt.PointingHandCursor)
 		self.btn_add.setToolTip("Add selected TinZr")
 		self.btn_add.clicked.connect(self.on_add_clicked)
-
 		self.btn_add.setStyleSheet("""
 			QPushButton {
 				font-size: 15pt;
@@ -622,12 +739,8 @@ class TinZrWearableSD(QtWidgets.QWidget):
 				border-radius: 10px;
 				padding: 0px;
 			}
-			QPushButton:hover {
-				background: rgba(255,255,255,0.10);
-			}
-			QPushButton:pressed {
-				background: rgba(255,255,255,0.14);
-			}
+			QPushButton:hover { background: rgba(255,255,255,0.10); }
+			QPushButton:pressed { background: rgba(255,255,255,0.14); }
 		""")
 
 		ctrl_layout.addWidget(self.btn_scan, row, 0, 1, 1)
@@ -660,13 +773,12 @@ class TinZrWearableSD(QtWidgets.QWidget):
 		ctrl_layout.addWidget(self.btn_set_participant, row, 4)
 		row += 1
 
-		# ✅ SMALLER FONT FOR THESE TWO
 		self.label_status = QtWidgets.QLabel("Status: Idle")
 		self.label_hb = QtWidgets.QLabel("Sync. trigger: —")
 		self.label_status.setStyleSheet("font-size: 9pt; color: #A8B3CF;")
 		self.label_status.setTextFormat(QtCore.Qt.PlainText)
 		self.label_hb.setStyleSheet("font-size: 9pt; color: #A8B3CF;")
-		
+
 		ctrl_layout.addWidget(self.label_status, row, 0, 1, 3)
 		ctrl_layout.addWidget(self.label_hb, row, 3, 1, 2)
 
@@ -704,7 +816,6 @@ class TinZrWearableSD(QtWidgets.QWidget):
 
 		self.lbl_version = QtWidgets.QLabel(__VERSION__)
 		self.lbl_version.setStyleSheet("font-size: 8pt; color: #A8B3CF;")
-
 		footer.addWidget(self.lbl_version)
 		main_layout.addLayout(footer)
 
@@ -887,7 +998,7 @@ class TinZrWearableSD(QtWidgets.QWidget):
 	def on_device_battery_clicked(self, addr: str):
 		if addr not in self.devices:
 			return
-		self._run_coro(self._send_cmd_to_device(addr, CMD_BATT))
+		self._run_coro(self._send_cmd_to_device(addr, CMD_BATT, response=False))
 
 	def on_device_connect_toggled(self, addr: str, checked: bool):
 		if addr not in self.devices:
@@ -909,7 +1020,14 @@ class TinZrWearableSD(QtWidgets.QWidget):
 
 		try:
 			self._log(f"Connecting to {addr} ...")
-			client = BleakClient(addr)
+			def _on_disconnect_cb(_client, _addr=addr):
+				# This callback is invoked by Bleak; jump back into our asyncio thread safely.
+				try:
+					self._run_coro(self._handle_ble_disconnect(_addr, why="BLE dropped"))
+				except Exception:
+					pass
+			client = BleakClient(addr, disconnected_callback=_on_disconnect_cb)
+
 			await client.connect()
 
 			if DEBUG_DUMP_SERVICES_ON_CONNECT:
@@ -942,7 +1060,7 @@ class TinZrWearableSD(QtWidgets.QWidget):
 				self._invoke(self, "_ui_enable_participant_controls", True)
 				self._invoke(self, "_ui_enable_sd_retrieve", True)
 
-			await self._send_cmd_to_device(addr, CMD_BATT)
+			await self._send_cmd_to_device(addr, CMD_BATT, response=False)
 
 			if self._logging_armed:
 				await self._arm_device_for_logging(addr)
@@ -1001,7 +1119,7 @@ class TinZrWearableSD(QtWidgets.QWidget):
 		return False
 
 	# =========================
-	# Notify handler
+	# Notify handler (SD transfer fixes + UI throttling)
 	# =========================
 	def _on_notify(self, addr: str, data: bytearray):
 		raw = bytes(data)
@@ -1029,57 +1147,120 @@ class TinZrWearableSD(QtWidgets.QWidget):
 
 			expected = int(st.get("seq_expected", 0))
 			if seq != expected:
-				self._run_coro(self._send_cmd_to_device(addr, f"{CMD_SD_NAKP}{expected}".encode("utf-8")))
+				self._run_coro(self._send_cmd_to_device(
+					addr, f"{CMD_SD_NAKP}{expected}".encode("utf-8"), response=False
+				))
 				return
 
 			pc_crc = zlib.crc32(payload) & 0xFFFFFFFF
 			if pc_crc != crc:
-				self._run_coro(self._send_cmd_to_device(addr, f"{CMD_SD_NAKP}{seq}".encode("utf-8")))
+				self._run_coro(self._send_cmd_to_device(
+					addr, f"{CMD_SD_NAKP}{seq}".encode("utf-8"), response=False
+				))
 				return
 
+			# WRITE
 			try:
 				if st.get("fh") is None:
-					st["fh"] = open(st["dest_path"], "wb")
+					mode = "ab" if int(st.get("bytes", 0)) > 0 else "wb"
+					st["fh"] = open(st["dest_path"], mode)
 				st["fh"].write(payload)
 			except Exception:
 				fut = st.get("future")
 				if fut and not fut.done():
-					fut.set_exception(RuntimeError("Failed writing to destination file"))
+					self._resolve_future_threadsafe(fut, exc=RuntimeError("Failed writing to destination file"))
 				return
 
+			# update counters
 			st["crc_acc"] = zlib.crc32(payload, st.get("crc_acc", 0)) & 0xFFFFFFFF
 			st["bytes"] = int(st.get("bytes", 0)) + plen
 			st["seq_expected"] = expected + 1
+			st["last_rx_monotonic"] = time.monotonic()
 
 			size = int(st.get("size") or 0)
 			done = int(st.get("bytes") or 0)
 
+			# UI tail = per-file bytes progress (THROTTLED)
 			if size > 0:
 				pct = int(100.0 * done / float(size))
 
-				i = int(st.get("file_i") or 1)
-				tot = int(st.get("file_total") or 1)
-				name = st.get("name") or "file"
+				now_m = time.monotonic()
+				last_ui_t = float(st.get("last_ui_monotonic") or 0.0)
+				last_ui_pct = int(st.get("last_ui_pct") if st.get("last_ui_pct") is not None else -1)
 
-				width = 28
-				filled = int(round(width * (pct / 100.0)))
-				bar = "█" * filled + "░" * (width - filled)
+				# at most 10 Hz OR if pct changes
+				if (now_m - last_ui_t) >= 0.10 or pct != last_ui_pct:
+					st["last_ui_monotonic"] = now_m
+					st["last_ui_pct"] = pct
 
-				dlg = getattr(self, "_sd_dialog_ref", None)
-				if dlg is not None:
+					i = int(st.get("file_i") or 1)
+					tot = int(st.get("file_total") or 1)
+					name = st.get("name") or "file"
+					width = 28
+					filled = int(round(width * (pct / 100.0)))
+					bar = "█" * filled + "░" * (width - filled)
+
+					dlg = getattr(self, "_sd_dialog_ref", None)
+					if dlg is not None:
+						try:
+							dlg.log_tqdm_2line(
+								filename=name,
+								line2=f"[{i}/{tot}] [{bar}] {pct:3d}%  ({done}/{size} bytes)"
+							)
+						except Exception:
+							pass
+
+			# ACK (must not block)
+			self._run_coro(self._send_cmd_to_device(
+				addr, f"{CMD_SD_ACKP}{seq}".encode("utf-8"), response=False
+			))
+
+			# Finalize if we have all bytes (even if END was early)
+			if size > 0 and done >= size:
+				fut = st.get("future")
+				if fut and not fut.done() and not st.get("_finalize_attempted", False):
+					st["_finalize_attempted"] = True
 					try:
-						dlg.log_tqdm_2line(
-							filename=name,
-							line2=f"[{i}/{tot}] [{bar}] {pct:3d}%  ({done}/{size} bytes)"
-						)
+						if st.get("fh"):
+							st["fh"].flush()
+							st["fh"].close()
+							st["fh"] = None
 					except Exception:
 						pass
 
-			self._run_coro(self._send_cmd_to_device(addr, f"{CMD_SD_ACKP}{seq}".encode("utf-8")))
+					try:
+						exp_crc = int(st.get("crc32") or 0) & 0xFFFFFFFF
+						disk_crc = self._crc32_file(st["dest_path"])
+						if disk_crc == exp_crc:
+							self._resolve_future_threadsafe(fut, value=True)
+						else:
+							self._resolve_future_threadsafe(
+								fut,
+								exc=RuntimeError(
+									f"VERIFY FAILED: disk_crc=0x{disk_crc:08X} exp=0x{exp_crc:08X}"
+								)
+							)
+					except Exception as e:
+						self._resolve_future_threadsafe(fut, exc=RuntimeError(f"Finalize verify failed: {e}"))
 
-			if size:
-				pct = int(100.0 * st["bytes"] / float(size))
-				self._invoke(self, "_ui_set_status", f"Retrieving {st.get('name')} ... {pct}% ({st['bytes']}/{size})")
+			# Throttle STATUS updates too (or Qt will backlog on big files)
+			if size > 0:
+				pct2 = int(100.0 * st["bytes"] / float(size))
+				now_m = time.monotonic()
+
+				last_status_t = float(st.get("last_status_monotonic") or 0.0)
+				last_status_pct = int(st.get("last_status_pct") if st.get("last_status_pct") is not None else -1)
+
+				# update at most 4 Hz OR when percent changes
+				if (now_m - last_status_t) >= 1.0 or pct2 != last_status_pct:
+					st["last_status_monotonic"] = now_m
+					st["last_status_pct"] = pct2
+					self._invoke(
+						self,
+						"_ui_set_status",
+						f"Retrieving {st.get('name')} ... {pct2}% ({st['bytes']}/{size})"
+					)
+
 			return
 
 		# Text notifications
@@ -1131,13 +1312,40 @@ class TinZrWearableSD(QtWidgets.QWidget):
 						st["seq_expected"] = 0
 						st["crc_acc"] = 0
 						st["bytes"] = 0
+						st["_finalize_attempted"] = False
+						st["last_rx_monotonic"] = time.monotonic()
+						st["got_end"] = False
+						st["end_crc"] = None
+						# reset UI throttle for a clean display
+						st["last_ui_monotonic"] = 0.0
+						st["last_ui_pct"] = -1
 					except Exception:
 						pass
 			return
 
+		# IMPORTANT: GET:END can arrive EARLY. Mark it; do not finalize unless bytes>=size.
 		if text.startswith("GET:END"):
 			st = self._sd_xfer.get(addr)
-			if st:
+			if not st:
+				return
+
+			try:
+				parts = text.split("|")
+				if len(parts) >= 2:
+					st["end_crc"] = int(parts[1], 16) & 0xFFFFFFFF
+			except Exception:
+				st["end_crc"] = None
+			st["got_end"] = True
+
+			# If already complete, finalize here as well
+			try:
+				size = int(st.get("size") or 0)
+				done = int(st.get("bytes") or 0)
+			except Exception:
+				size = 0
+				done = 0
+
+			if size > 0 and done >= size:
 				try:
 					if st.get("fh"):
 						st["fh"].flush()
@@ -1147,22 +1355,25 @@ class TinZrWearableSD(QtWidgets.QWidget):
 					pass
 
 				ok = True
-				if st.get("size") is not None and int(st.get("bytes", 0)) != int(st.get("size", 0)):
-					ok = False
-				if st.get("crc32") is not None and int(st.get("crc_acc", 0)) != int(st.get("crc32", 0)):
+				try:
+					exp_crc = int(st.get("crc32") or 0) & 0xFFFFFFFF
+					disk_crc = self._crc32_file(st["dest_path"])
+					if disk_crc != exp_crc:
+						ok = False
+				except Exception:
 					ok = False
 
 				fut = st.get("future")
-				if ok:
-					self._resolve_future_threadsafe(fut, value=True)
-				else:
-					self._resolve_future_threadsafe(
-						fut,
-						exc=RuntimeError(
-							f"VERIFY FAILED: bytes={st.get('bytes')}/{st.get('size')} "
-							f"crc32=0x{int(st.get('crc_acc',0)) & 0xFFFFFFFF:08X}/0x{int(st.get('crc32',0)) & 0xFFFFFFFF:08X}"
+				if fut:
+					if ok:
+						self._resolve_future_threadsafe(fut, value=True)
+					else:
+						self._resolve_future_threadsafe(
+							fut,
+							exc=RuntimeError(
+								f"VERIFY FAILED: bytes={done}/{size} exp=0x{int(st.get('crc32') or 0) & 0xFFFFFFFF:08X}"
+							)
 						)
-					)
 			return
 
 		if text.startswith("BAT:"):
@@ -1232,10 +1443,10 @@ class TinZrWearableSD(QtWidgets.QWidget):
 			raise RuntimeError("Set participant before logging")
 
 		safe = self._sanitize_subject(name)
-		await self._send_cmd_to_device(addr, f"P:{safe}".encode("utf-8"))
+		await self._send_cmd_to_device(addr, f"P:{safe}".encode("utf-8"), response=False)
 		device_alias = info.get("alias") or info.get("ble_name") or "TinZr"
-		await self._send_cmd_to_device(addr, self._build_experiment_meta_payload(device_alias))
-		await self._send_cmd_to_device(addr, CMD_START)
+		await self._send_cmd_to_device(addr, self._build_experiment_meta_payload(device_alias), response=False)
+		await self._send_cmd_to_device(addr, CMD_START, response=False)
 
 	async def _start_logging_all(self):
 		try:
@@ -1332,7 +1543,7 @@ class TinZrWearableSD(QtWidgets.QWidget):
 		self._sd_ls_futures[addr] = fut
 		self._sd_ls_buffers.pop(addr, None)
 
-		await self._send_cmd_to_device(addr, CMD_SD_LS)
+		await self._send_cmd_to_device(addr, CMD_SD_LS, response=False)
 
 		try:
 			lines = await asyncio.wait_for(fut, timeout=8.0)
@@ -1362,12 +1573,18 @@ class TinZrWearableSD(QtWidgets.QWidget):
 		total = len(names)
 		for i, name in enumerate(names):
 			prefix = f"[{i+1}/{total}] "
+			dest_path = os.path.abspath(os.path.join(dest_dir, name))
 
-			dest_path = os.path.join(dest_dir, name)
-			dest_path = os.path.abspath(dest_path)
+			# ALWAYS START CLEAN
+			try:
+				if os.path.exists(dest_path):
+					os.remove(dest_path)
+			except Exception:
+				pass
 
 			loop = asyncio.get_running_loop()
 			file_future = loop.create_future()
+
 			self._sd_xfer[addr] = {
 				"mode": "waiting_begin",
 				"name": name,
@@ -1381,41 +1598,161 @@ class TinZrWearableSD(QtWidgets.QWidget):
 				"future": file_future,
 				"file_i": i + 1,
 				"file_total": total,
+				"_finalize_attempted": False,
+				"last_rx_monotonic": 0.0,
+				"got_end": False,
+				"end_crc": None,
+				# UI throttle
+				"last_ui_monotonic": 0.0,
+				"last_ui_pct": -1,
 			}
 
+			# Green bar = file-count progress
 			progress_cb(int(100.0 * i / max(1, total)), f"{prefix}Requesting {name} ...")
-			await self._send_cmd_to_device(addr, f"{CMD_SD_GETP}{name}".encode("utf-8"))
+			await self._send_cmd_to_device(addr, f"{CMD_SD_GETP}{name}".encode("utf-8"), response=False)
 
-			try:
-				await asyncio.wait_for(file_future, timeout=120.0)
-			except asyncio.TimeoutError:
-				raise RuntimeError(f"Timeout downloading {name}")
-			finally:
-				st = self._sd_xfer.get(addr)
-				if st and st.get("fh"):
+			# Watchdog:
+			#  - NAK expected seq when stalled / END came early
+			#  - If repeated NAKs do not resume data, re-GET clean (firmware likely stopped after early END)
+			start = time.monotonic()
+			last_poke = 0.0
+			poke_count = 0
+			reget_count = 0
+			last_reget = 0.0
+
+			while True:
+				if file_future.done():
+					file_future.result()
+					break
+
+				if (time.monotonic() - start) > 5*24*60*60: # stop after 5 days 
+					st = self._sd_xfer.get(addr) or {}
+					print("TIMEOUT:",
+						  "pct=", (100.0 * int(st.get("bytes") or 0) / max(1, int(st.get("size") or 1))),
+						  "done=", st.get("bytes"),
+						  "size=", st.get("size"),
+						  "got_end=", st.get("got_end"),
+						  "mode=", st.get("mode"),
+						  "seq_expected=", st.get("seq_expected"),
+						  "since_rx=", time.monotonic() - float(st.get("last_rx_monotonic") or 0.0))
+					raise RuntimeError(f"Timeout downloading {name} (no completion)")
+
+
+				st = self._sd_xfer.get(addr) or {}
+				last_rx = float(st.get("last_rx_monotonic") or 0.0)
+				since_rx = time.monotonic() - last_rx if last_rx > 0 else 1e9
+
+				got_end = bool(st.get("got_end"))
+				try:
+					size = int(st.get("size") or 0)
+					done = int(st.get("bytes") or 0)
+				except Exception:
+					size = 0
+					done = 0
+
+				need_more = (size > 0 and done < size)
+
+				# don't spam recovery before BEGIN
+				if st.get("mode") == "waiting_begin":
+					await asyncio.sleep(0.05)
+					continue
+
+				# 1) NAK poke
+				if need_more and (since_rx > 2.0 or got_end) and (time.monotonic() - last_poke) > 1.0:
+					exp = int(st.get("seq_expected") or 0)
+					poke_count += 1
 					try:
-						st["fh"].close()
+						await self._send_cmd_to_device(addr, f"{CMD_SD_NAKP}{exp}".encode("utf-8"), response=False)
+						last_poke = time.monotonic()
 					except Exception:
 						pass
-					st["fh"] = None
 
+				# 2) If repeated NAKs don't resume, re-GET clean
+				if need_more and (poke_count >= 4) and (since_rx > 4.0) and (time.monotonic() - last_reget) > 5.0:
+					reget_count += 1
+					last_reget = time.monotonic()
+
+					print(f"[PC -> {addr}] REGET:{name}  (attempt {reget_count})  done={done}/{size}")
+
+					try:
+						if st.get("fh"):
+							try:
+								st["fh"].flush()
+								st["fh"].close()
+							except Exception:
+								pass
+							st["fh"] = None
+
+						try:
+							if os.path.exists(dest_path):
+								os.remove(dest_path)
+						except Exception:
+							pass
+
+						st["mode"] = "waiting_begin"
+						st["size"] = None
+						st["crc32"] = None
+						st["crc_acc"] = 0
+						st["bytes"] = 0
+						st["seq_expected"] = 0
+						st["last_rx_monotonic"] = 0.0
+						st["_finalize_attempted"] = False
+						st["got_end"] = False
+						st["end_crc"] = None
+						st["last_ui_monotonic"] = 0.0
+						st["last_ui_pct"] = -1
+
+						poke_count = 0
+
+						await self._send_cmd_to_device(addr, f"{CMD_SD_GETP}{name}".encode("utf-8"), response=False)
+
+					except Exception:
+						pass
+
+				if reget_count >= 3:
+					raise RuntimeError(f"Device keeps ending early / stalling; failed after {reget_count} re-GET attempts for {name}")
+
+				await asyncio.sleep(0.05)
+
+			# close handle if still open
+			st = self._sd_xfer.get(addr)
+			if st and st.get("fh"):
+				try:
+					st["fh"].close()
+				except Exception:
+					pass
+				st["fh"] = None
+
+			# Completed file -> update overall progress
 			st = self._sd_xfer.get(addr, {})
 			progress_cb(
 				int(100.0 * (i+1) / max(1, total)),
-				f"{prefix}Verified OK: {name}  ({st.get('bytes',0)} bytes, CRC32=0x{int(st.get('crc_acc',0)) & 0xFFFFFFFF:08X})"
+				f"{prefix}Verified OK: {name}  ({st.get('bytes',0)} bytes)"
 			)
 
 	# =========================
 	# BLE send helpers
 	# =========================
-	async def _send_cmd_to_device(self, addr: str, payload: bytes):
+	async def _send_cmd_to_device(self, addr: str, payload: bytes, response: bool = False):
 		info = self.devices.get(addr)
 		if not info:
 			raise RuntimeError("Unknown device")
+
 		client: BleakClient = info.get("client")
-		if not client or not client.is_connected:
+		if (not client) or (not getattr(client, "is_connected", False)):
+			# Auto-handle the drop: remove + switch off logging
+			await self._handle_ble_disconnect(addr, why="send failed (not connected)")
 			raise RuntimeError("BLE client not connected")
-		await client.write_gatt_char(TINZR_BLE_RX_CHAR_UUID, payload, response=True)
+
+		try:
+			await client.write_gatt_char(TINZR_BLE_RX_CHAR_UUID, payload, response=bool(response))
+		except Exception as e:
+			# If the exception smells like a dead link, treat it the same way.
+			msg = str(e).lower()
+			if ("not connected" in msg) or ("disconnected" in msg) or ("device not found" in msg):
+				await self._handle_ble_disconnect(addr, why=f"send exception: {e}")
+			raise
+
 
 	async def _send_cmd_all(self, payload: bytes):
 		for addr, info in list(self.devices.items()):

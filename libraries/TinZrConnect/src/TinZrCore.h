@@ -94,7 +94,7 @@ public:
     
     // Convenience: read both, return what you got this loop
 	// (IMU is usually always available when ready; PPG may not have a new sample)
-	bool readImuPpg(TinZrImuSample& imu, TinZrPpgSample& ppg, bool& gotPpg);
+	bool readImuPpg(TinZrImuSampleSI& imu, TinZrPpgSample& ppg, bool& gotPpg);
 
     
     

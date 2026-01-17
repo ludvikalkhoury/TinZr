@@ -284,6 +284,13 @@ static void _write_log_metadata_header(
 	TinZrSD.writeLine(String("# sample_interval_ms: ") + String(cfg.sample_interval_ms));
 	TinZrSD.writeLine(String("# nominal_fs_hz: ") + String(fs_hz, 3));
 	TinZrSD.writeLine(String("# start_local_millis: ") + String(startLocalMs));
+	
+	// ---- IMU metadata (matches TinZrCore.cpp config) ----
+	TinZrSD.writeLine("# imu_accel_units: g");
+	TinZrSD.writeLine("# imu_gyro_units: dps");
+	TinZrSD.writeLine("# imu_accel_fullscale: +/-8g");
+	TinZrSD.writeLine("# imu_gyro_fullscale: +/-1000dps");
+	
 	TinZrSD.writeLine("# -----------------------------------------------");
 	TinZrSD.writeLine("#"); // blank/comment line separator
 }
@@ -930,6 +937,8 @@ void TinZrWearableSDClass::_handleBleCommand(const uint8_t* data, size_t len) {
 
 		if (_recording) {
 			TinZrSD.flush();
+			TinZrSD.writeLine("====================RecordingEndsHere====================");
+			TinZrSD.flush();
 			TinZrSD.closeLog();
 			TinZrSD.setRecording(false);
 			_recording = false;
@@ -1033,7 +1042,7 @@ void TinZrWearableSDClass::_handleStreaming() {
 				);
 
 				// CSV header
-				TinZrSD.writeLine("t_ms,red,ir,ax,ay,az,gx,gy,gz,batt_pct,hr_bpm,spo2,sync_trigger");
+				TinZrSD.writeLine("t_ms,red,ir,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,batt_pct,hr_bpm,spo2_pct,sync_trigger");
 
 #if TINZR_ENABLE_BLE
 				if (_bleStarted && _ble.connected()) {
@@ -1065,7 +1074,7 @@ void TinZrWearableSDClass::_handleStreaming() {
 	}
 
 	// Read sensors via TinZrCore
-	TinZrImuSample imu;
+	TinZrImuSampleSI imu;
 	TinZrPpgSample ppg;
 	bool gotPpg = false;
 	bool okImu = TinZr.readImuPpg(imu, ppg, gotPpg);
@@ -1142,8 +1151,8 @@ void TinZrWearableSDClass::_handleStreaming() {
 			(unsigned long long)t_ms,
 			(unsigned long)red_raw,
 			(unsigned long)ir_raw,
-			(double)imu.ax, (double)imu.ay, (double)imu.az,
-			(double)imu.gx, (double)imu.gy, (double)imu.gz,
+			(double)imu.ax_g, (double)imu.ay_g, (double)imu.az_g,
+			(double)imu.gx_dps, (double)imu.gy_dps, (double)imu.gz_dps,
 			(unsigned)sLastBattPct,
 			(unsigned)sLastHr,
 			(unsigned)sLastSpo2,
