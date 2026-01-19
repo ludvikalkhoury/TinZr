@@ -1,0 +1,561 @@
+<!doctype html>
+<html>
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width,initial-scale=1" />
+	<title>TinZr Web BLE</title>
+
+	<style>
+		:root{
+			--bg: #020817;
+			--base: #071529;
+			--text: #E0E8FF;
+			--subtext: #A8B3CF;
+			--accent: #1E88E5;
+
+			--btn: #1565C0;
+			--btnHover: #1E88E5;
+			--btnPress: #0D47A1;
+			--btnDisabled: #0b2340;
+
+			--cardRadius: 18px;
+			--inputRadius: 12px;
+			--tap: 52px; /* big touch target */
+		}
+
+		html, body { height: 100%; }
+		body{
+			margin: 0;
+			background: var(--bg);
+			color: var(--text);
+			font-family: "Segoe UI","Roboto",system-ui,-apple-system,sans-serif;
+			-webkit-font-smoothing: antialiased;
+			-webkit-tap-highlight-color: transparent;
+		}
+
+		/* Long / phone layout */
+		.wrap{
+			width: 100%;
+			max-width: 520px;
+			margin: 0 auto;
+			padding: 14px 14px 96px; /* bottom padding for sticky bar */
+			display: flex;
+			flex-direction: column;
+			gap: 12px;
+			box-sizing: border-box;
+		}
+
+		.card{
+			background: rgba(255,255,255,0.04);
+			border-radius: var(--cardRadius);
+			padding: 14px;
+			box-shadow: 0 0 0 1px rgba(30,136,229,0.06) inset;
+		}
+
+		.header .title{
+			font-size: 18pt;
+			font-weight: 650;
+			color: #E3F2FD;
+			line-height: 1.15;
+		}
+		.header .sub{
+			font-size: 10pt;
+			color: var(--subtext);
+			margin-top: 4px;
+		}
+
+		.kv{
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+			gap: 10px;
+			flex-wrap: wrap;
+			margin-top: 8px;
+		}
+		.kv .k{ font-size: 9pt; color: var(--subtext); }
+		.kv .v{ font-size: 10pt; color: var(--text); }
+
+		/* Full-width blocks */
+		.block{ display: flex; flex-direction: column; gap: 8px; }
+		.label{
+			font-size: 10pt;
+			color: var(--subtext);
+		}
+
+		input{
+			height: var(--tap);
+			background: var(--base);
+			color: var(--text);
+			border: 1px solid rgba(30,136,229,0.9);
+			border-radius: var(--inputRadius);
+			padding: 0 14px;
+			outline: none;
+			font-size: 12pt;
+			box-sizing: border-box;
+			width: 100%;
+		}
+		input::placeholder{ color: rgba(168,179,207,0.65); }
+
+		button{
+			height: var(--tap);
+			width: 100%;
+			background: var(--btn);
+			color: #fff;
+			border: none;
+			border-radius: 16px;
+			padding: 0 16px;
+			font-weight: 650;
+			font-size: 12pt;
+			cursor: pointer;
+			box-sizing: border-box;
+		}
+		button:hover{ background: var(--btnHover); }
+		button:active{ background: var(--btnPress); }
+		button:disabled{
+			background: var(--btnDisabled);
+			color: #70758c;
+			cursor: not-allowed;
+		}
+
+		.statusBox{
+			font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+			font-size: 10pt;
+			color: #B8C3E0;
+			background: rgba(255,255,255,0.06);
+			border-radius: 14px;
+			padding: 12px;
+			white-space: pre-wrap;
+			overflow-wrap: anywhere;
+			min-height: 120px; /* taller on phone */
+			line-height: 1.35;
+		}
+
+		/* ToggleSwitch */
+		.toggleRow{
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 12px;
+			padding: 10px 2px;
+		}
+		.toggleRow .toggleLabel{
+			font-size: 12pt;
+			font-weight: 650;
+			color: #E3F2FD;
+		}
+
+		.toggle{
+			position: relative;
+			width: 64px;
+			height: 34px;
+			border-radius: 999px;
+			background: rgb(110,110,120);
+			cursor: pointer;
+			flex: 0 0 auto;
+		}
+		.toggle.on{ background: #4CAF50; }
+		.toggle .thumb{
+			position: absolute;
+			top: 3px;
+			left: 3px;
+			width: 28px;
+			height: 28px;
+			border-radius: 50%;
+			background: rgb(240,240,240);
+			transition: transform 120ms ease;
+		}
+		.toggle.on .thumb{ transform: translateX(30px); }
+
+		/* Battery widget (hidden until device is added) */
+		.battRow{
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 12px;
+			padding: 2px 2px 8px;
+		}
+		.battery{
+			position: relative;
+			width: 62px;
+			height: 30px;
+			cursor: pointer;
+			user-select: none;
+			flex: 0 0 auto;
+		}
+		.battery .body{
+			position: absolute;
+			left: 3px;
+			top: 3px;
+			width: calc(100% - 9px);
+			height: calc(100% - 6px);
+			background: var(--bg);
+			border: 1.5px solid #E0E8FF;
+			border-radius: 7px;
+			box-sizing: border-box;
+			overflow: hidden;
+		}
+		.battery .fill{
+			position: absolute;
+			left: 1.5px;
+			top: 1.5px;
+			height: calc(100% - 3px);
+			width: 0%;
+			border-radius: 5px;
+			background: #111827;
+		}
+		.battery .term{
+			position: absolute;
+			right: 0px;
+			top: 10px;
+			width: 7px;
+			height: 10px;
+			background: var(--bg);
+			border: 1.2px solid #E0E8FF;
+			border-radius: 2px;
+			box-sizing: border-box;
+		}
+		.battery .pct{
+			position: absolute;
+			left: 3px;
+			top: 3px;
+			width: calc(100% - 9px);
+			height: calc(100% - 6px);
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			font-weight: 800;
+			font-size: 12pt;
+			color: #E0E8FF;
+			pointer-events: none;
+		}
+
+		/* Sticky bottom bar (big Connect + Stop) */
+		.sticky{
+			position: fixed;
+			left: 0;
+			right: 0;
+			bottom: 0;
+			padding: 10px 14px 14px;
+			background: linear-gradient(to top, rgba(2,8,23,0.95), rgba(2,8,23,0.70), rgba(2,8,23,0));
+			backdrop-filter: blur(8px);
+			box-sizing: border-box;
+		}
+		.stickyInner{
+			max-width: 520px;
+			margin: 0 auto;
+			display: grid;
+			grid-template-columns: 1fr 1fr;
+			gap: 10px;
+		}
+		.stickyInner button{
+			height: 56px;
+			border-radius: 18px;
+			font-size: 13pt;
+		}
+		.danger{
+			background: rgba(244,67,54,0.95);
+		}
+		.danger:hover{ background: rgba(244,67,54,1); }
+		.danger:active{ background: rgba(200,40,30,1); }
+
+		.footer{
+			text-align: right;
+			font-size: 9pt;
+			color: var(--subtext);
+			padding: 0 4px;
+		}
+	</style>
+</head>
+
+<body>
+	<div class="wrap">
+		<div class="card header">
+			<div class="title">TinZr Wearable SD</div>
+			<div class="sub">Bluefy • Web Bluetooth • phone timestamp logging</div>
+
+			<div class="kv">
+				<div class="k">Device</div>
+				<div class="v" id="devLabel">Not connected</div>
+			</div>
+			<div class="kv">
+				<div class="k">Sync. trigger</div>
+				<div class="v" id="hbLabel">—</div>
+			</div>
+		</div>
+
+		<!-- Hidden until a TinZr is "added" (connected) -->
+		<div class="card" id="cardDevice" style="display:none;">
+			<div class="battRow" id="batteryRow" style="display:none;">
+				<div class="label">Battery</div>
+				<div class="battery" id="battery" title="Tap to refresh battery">
+					<div class="body"><div class="fill" id="battFill"></div></div>
+					<div class="term"></div>
+					<div class="pct" id="battPct">--</div>
+				</div>
+			</div>
+
+			<div class="toggleRow">
+				<div class="toggleLabel">SD Log (All)</div>
+				<div class="toggle" id="toggleLog"><div class="thumb"></div></div>
+			</div>
+		</div>
+
+		<div class="card">
+			<div class="block">
+				<div class="label">Participant</div>
+				<input id="participant" placeholder="e.g., test001" />
+				<button id="btnSetParticipant" disabled>Set Participant</button>
+			</div>
+		</div>
+
+		<div class="card">
+			<div class="label" style="margin-bottom:8px;">Status</div>
+			<div class="statusBox" id="status">Status: Idle</div>
+		</div>
+
+		<div class="footer">V1.0.0</div>
+	</div>
+
+	<div class="sticky">
+		<div class="stickyInner">
+			<button id="btnConnect">Connect</button>
+			<button id="btnStop" class="danger" disabled>Stop</button>
+		</div>
+	</div>
+
+<script>
+const TINZR_BLE_SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+const TINZR_BLE_RX_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+const TINZR_BLE_TX_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a9";
+
+let device=null, server=null, rxChar=null, txChar=null;
+let heartbeatTimer=null;
+let loggingArmed=false;
+
+function setStatus(s){
+	document.getElementById("status").textContent = "Status: " + s;
+}
+function enc(s){ return new TextEncoder().encode(s); }
+
+async function writeBytes(bytes){
+	if(!rxChar) throw new Error("Not connected");
+	await rxChar.writeValue(bytes);
+}
+async function writeText(s){ await writeBytes(enc(s)); }
+
+function nowStamp(){
+	const d=new Date();
+	const pad=(n,w=2)=>String(n).padStart(w,"0");
+	const ms=pad(d.getMilliseconds(),3);
+	return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}:${ms}.0000`;
+}
+function nowPrint(){
+	const d=new Date();
+	const pad=(n,w=2)=>String(n).padStart(w,"0");
+	return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function setToggle(on){
+	const t=document.getElementById("toggleLog");
+	if(on) t.classList.add("on");
+	else t.classList.remove("on");
+}
+
+function showDeviceUI(show){
+	const card = document.getElementById("cardDevice");
+	if(card) card.style.display = show ? "" : "none";
+}
+
+function showBatteryUI(show){
+	const row = document.getElementById("batteryRow");
+	if(row) row.style.display = show ? "" : "none";
+}
+
+/* BatteryWidget behavior: >=60 green, >=30 yellow, else red; unknown -> dark */
+function setBattery(pct){
+	const pctEl=document.getElementById("battPct");
+	const fillEl=document.getElementById("battFill");
+
+	if(pct===null||pct===undefined||Number.isNaN(pct)){
+		pctEl.textContent="--";
+		fillEl.style.width="0%";
+		fillEl.style.background="#111827";
+		return;
+	}
+	pct=Math.max(0,Math.min(100,Math.floor(pct)));
+	pctEl.textContent=String(pct);
+	fillEl.style.width=pct+"%";
+	if(pct>=60) fillEl.style.background="#4CAF50";
+	else if(pct>=30) fillEl.style.background="#FFC107";
+	else fillEl.style.background="#F44336";
+}
+
+function enableControls(on){
+	document.getElementById("btnSetParticipant").disabled = !on;
+	document.getElementById("btnStop").disabled = !on;
+
+	// Toggle only usable when connected
+	const t = document.getElementById("toggleLog");
+	t.style.opacity = on ? "1" : "0.5";
+	t.style.pointerEvents = on ? "auto" : "none";
+}
+
+function stopHeartbeat(){
+	if(heartbeatTimer){
+		clearInterval(heartbeatTimer);
+		heartbeatTimer=null;
+	}
+	document.getElementById("hbLabel").textContent = "—";
+}
+
+function startHeartbeat(){
+	stopHeartbeat();
+	heartbeatTimer=setInterval(async ()=>{
+		if(!loggingArmed) return;
+		try{
+			document.getElementById("hbLabel").textContent = nowPrint();
+			await writeText("T:"+nowStamp());
+		}catch(e){
+			setStatus("Heartbeat failed: "+e);
+		}
+	}, 5000);
+}
+
+function handleNotify(event){
+	const text=new TextDecoder().decode(event.target.value);
+	const line=text.replace(/\r?\n/g,"").trim();
+	if(!line) return;
+
+	if(line.startsWith("BAT:")){
+		const rawp=line.split(":")[1].replace("%","").trim();
+		const pct=parseInt(rawp,10);
+		if(!Number.isNaN(pct)) setBattery(pct);
+	}
+
+	setStatus(line);
+}
+
+async function connect(){
+	setStatus("Requesting device...");
+	device = await navigator.bluetooth.requestDevice({
+		filters: [{ services: [TINZR_BLE_SERVICE_UUID] }]
+	});
+
+	device.addEventListener("gattserverdisconnected", ()=>{
+		setStatus("Disconnected");
+		document.getElementById("devLabel").textContent="Not connected";
+		enableControls(false);
+		setToggle(false);
+		loggingArmed=false;
+		stopHeartbeat();
+		setBattery(null);
+
+		// Hide device/battery (like removing the card)
+		showBatteryUI(false);
+		showDeviceUI(false);
+
+		rxChar = null;
+		txChar = null;
+		server = null;
+	});
+
+	setStatus("Connecting...");
+	server = await device.gatt.connect();
+	const service = await server.getPrimaryService(TINZR_BLE_SERVICE_UUID);
+	rxChar = await service.getCharacteristic(TINZR_BLE_RX_CHAR_UUID);
+	txChar = await service.getCharacteristic(TINZR_BLE_TX_CHAR_UUID);
+
+	await txChar.startNotifications();
+	txChar.addEventListener("characteristicvaluechanged", handleNotify);
+
+	document.getElementById("devLabel").textContent = device.name || "TinZr";
+	enableControls(true);
+
+	// Now the TinZr is effectively "added": show device card + battery
+	showDeviceUI(true);
+	showBatteryUI(true);
+
+	setStatus("Connected");
+	await writeText("BAT");
+}
+
+async function setParticipant(){
+	const p=document.getElementById("participant").value.trim();
+	if(!p){
+		setStatus("Participant is empty");
+		return;
+	}
+	await writeText("P:"+p);
+
+	// Optional meta line (same idea as your Qt app)
+	const devName=(device && device.name) ? device.name : "TinZr";
+	await writeText("X: sub-"+p+"|device-"+devName+"|"+nowStamp());
+
+	setStatus("Participant set: "+p);
+}
+
+async function startLogging(){
+	const p=document.getElementById("participant").value.trim();
+	if(!p){
+		setStatus("Set participant before logging");
+		setToggle(false);
+		return;
+	}
+	await setParticipant();
+	await writeBytes(new Uint8Array([ "S".charCodeAt(0) ]));
+	loggingArmed=true;
+	startHeartbeat();
+	setStatus("Logging armed. Phone timestamps every 5s.");
+}
+
+async function stopLogging(){
+	stopHeartbeat();
+	await writeBytes(new Uint8Array([ "E".charCodeAt(0) ]));
+	loggingArmed=false;
+	setStatus("Logging stopped.");
+}
+
+/* UI wiring */
+document.getElementById("btnConnect").onclick = ()=>connect().catch(e=>setStatus("Connect error: "+e));
+document.getElementById("btnSetParticipant").onclick = ()=>setParticipant().catch(e=>setStatus("Set participant error: "+e));
+
+document.getElementById("toggleLog").onclick = async ()=>{
+	if(!rxChar){
+		setStatus("Not connected");
+		setToggle(false);
+		return;
+	}
+	const wantOn = !loggingArmed;
+	setToggle(wantOn);
+	try{
+		if(wantOn) await startLogging();
+		else await stopLogging();
+	}catch(e){
+		setStatus("Toggle error: "+e);
+		setToggle(loggingArmed);
+	}
+};
+
+document.getElementById("btnStop").onclick = ()=>stopLogging().catch(e=>setStatus("Stop error: "+e));
+
+document.getElementById("battery").onclick = async ()=>{
+	if(!rxChar){
+		setStatus("Not connected");
+		return;
+	}
+	try{
+		await writeText("BAT");
+	}catch(e){
+		setStatus("BAT error: "+e);
+	}
+};
+
+/* init */
+enableControls(false);
+setBattery(null);
+setToggle(false);
+showDeviceUI(false);
+showBatteryUI(false);
+</script>
+</body>
+</html>
