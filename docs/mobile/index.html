@@ -323,7 +323,6 @@
 			</div>
 		</div>
 
-		<!-- GLOBAL CONTROLS (like Python GUI) -->
 		<div class="card">
 			<div class="toggleRow">
 				<div class="toggleLabel">SD Log (All)</div>
@@ -337,7 +336,6 @@
 			</div>
 		</div>
 
-		<!-- Device cards -->
 		<div id="devices"></div>
 
 		<div class="card">
@@ -356,7 +354,6 @@
 	</div>
 
 <script>
-/* ================== CONFIG ================== */
 const TINZR_BLE_SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
 const TINZR_BLE_RX_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
 const TINZR_BLE_TX_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a9";
@@ -370,14 +367,12 @@ const CMD_SD_LS = "LS";
 
 const HEARTBEAT_PERIOD_S = 5.0;
 
-/* ================== GLOBAL STATE ================== */
 let DEV_ID = 0;
 const devices = [];
 
 let loggingArmed = false;
 let heartbeatTimer = null;
 
-/* ================== GLOBAL UI ================== */
 function setStatus(s){
 	document.getElementById("status").textContent = "Status: " + s;
 }
@@ -420,8 +415,10 @@ function refreshStopButton(){
 	document.getElementById("btnStopAll").disabled = !loggingArmed;
 	setToggle(document.getElementById("toggleGlobal"), loggingArmed);
 }
+function anyConnected(){
+	return devices.some(d => d.connected);
+}
 
-/* Battery UI */
 function setBatteryUI(pctEl, fillEl, pct){
 	if(pct===null||pct===undefined||Number.isNaN(pct)){
 		pctEl.textContent="--";
@@ -437,24 +434,18 @@ function setBatteryUI(pctEl, fillEl, pct){
 	else fillEl.style.background="#F44336";
 }
 
-/* ================== DEVICE MODEL ================== */
 function mkDeviceModel(){
 	return {
 		id: ++DEV_ID,
-
 		device: null,
 		server: null,
 		rxChar: null,
 		txChar: null,
-
 		connecting: false,
 		connected: false,
-
 		notifyTextBuf: "",
-
 		lsCollecting: false,
 		lsLines: [],
-
 		el: {},
 		_notifyHandler: null,
 	};
@@ -473,7 +464,7 @@ async function safeWriteText(d, s){
 		return true;
 	}catch(e){
 		setStatus(`[${d.el.name.textContent}] BLE write failed → disconnecting`);
-		await disconnectDevice(d);
+		await disconnectDevice(d, false, true);
 		return false;
 	}
 }
@@ -483,14 +474,9 @@ async function safeWriteBytes(d, bytes){
 		return true;
 	}catch(e){
 		setStatus(`[${d.el.name.textContent}] BLE write failed → disconnecting`);
-		await disconnectDevice(d);
+		await disconnectDevice(d, false, true);
 		return false;
 	}
-}
-
-/* ================== GLOBAL LOGIC (like Python GUI) ================== */
-function anyConnected(){
-	return devices.some(d => d.connected);
 }
 
 async function sendCmdAllText(s){
@@ -511,34 +497,29 @@ function buildExperimentMeta(alias){
 }
 
 async function armDeviceForLogging(d){
-	// mirrors _arm_device_for_logging()
 	const name = participant();
 	if(!name) throw new Error("Set participant before logging");
 
 	const safe = sanitizeSubject(name);
-	await safeWriteText(d, "P:"+safe);
+	if(!(await safeWriteText(d, "P:"+safe))) throw new Error("Failed P:");
 
 	const alias = (d.device && d.device.name) ? d.device.name : ("TinZr_"+d.id);
-	await safeWriteText(d, buildExperimentMeta(alias));
+	if(!(await safeWriteText(d, buildExperimentMeta(alias)))) throw new Error("Failed X:");
 
-	await safeWriteBytes(d, new Uint8Array([ CMD_START.charCodeAt(0) ]));
+	if(!(await safeWriteBytes(d, new Uint8Array([ CMD_START.charCodeAt(0) ])))) throw new Error("Failed START");
 }
 
 function startHeartbeat(){
 	stopHeartbeat();
 	heartbeatTimer = setInterval(async ()=>{
 		if(!loggingArmed || !anyConnected()) return;
-
-		const stamp_print = nowPrint();
-		document.getElementById("hbLabel").textContent = stamp_print;
-
+		document.getElementById("hbLabel").textContent = nowPrint();
 		await sendCmdAllText("T:"+nowStamp());
 	}, Math.floor(HEARTBEAT_PERIOD_S * 1000));
-	// immediate tick
+
 	document.getElementById("hbLabel").textContent = nowPrint();
 	sendCmdAllText("T:"+nowStamp());
 }
-
 function stopHeartbeat(){
 	if(heartbeatTimer){
 		clearInterval(heartbeatTimer);
@@ -554,7 +535,6 @@ async function startLoggingAll(){
 		refreshStopButton();
 		return;
 	}
-
 	const name = participant();
 	if(!name){
 		setStatus("Set participant before logging.");
@@ -562,7 +542,6 @@ async function startLoggingAll(){
 		refreshStopButton();
 		return;
 	}
-
 	try{
 		for(const d of devices){
 			if(d.connected){
@@ -593,18 +572,18 @@ async function stopLoggingAll(){
 	}
 }
 
-/* ================== Notify parsing per device ================== */
+/* ============ Notify parsing per device ============ */
 function handleLine(d, line){
 	if(!line) return;
 
 	if(line.startsWith("LS:BEGIN")){
-		d.lsCollecting=true;
-		d.lsLines=[];
+		d.lsCollecting = true;
+		d.lsLines = [];
 		d.el.files.textContent = "Listing files...";
 		return;
 	}
 	if(d.lsCollecting && (line.startsWith("LS:END") || line.startsWith("LS: sent files ="))){
-		d.lsCollecting=false;
+		d.lsCollecting = false;
 		d.el.files.textContent = d.lsLines.length ? d.lsLines.join("\n") : "No files.";
 		setStatus(`[${d.el.name.textContent}] LS complete`);
 		return;
@@ -614,14 +593,14 @@ function handleLine(d, line){
 		return;
 	}
 	if(d.lsCollecting && line.startsWith("LS:")){
-		const payload=line.split(":", 2)[1]?.trim() || "";
+		const payload = line.split(":", 2)[1]?.trim() || "";
 		if(payload) d.lsLines.push(payload);
 		return;
 	}
 
 	if(line.startsWith("BAT:")){
-		const rawp=line.split(":")[1].replace("%","").trim();
-		const pct=parseInt(rawp,10);
+		const rawp = line.split(":")[1].replace("%","").trim();
+		const pct = parseInt(rawp, 10);
 		if(!Number.isNaN(pct)){
 			setBatteryUI(d.el.battPct, d.el.battFill, pct);
 		}
@@ -636,32 +615,23 @@ function handleNotifyFactory(d){
 	return function(event){
 		const chunk = new TextDecoder().decode(event.target.value);
 		d.notifyTextBuf += chunk;
-
-		// normalize CRLF → LF
 		d.notifyTextBuf = d.notifyTextBuf.replace(/\r/g, "");
 
 		let idx;
-
-		// ---- 1) Normal newline-based parsing ----
 		while((idx = d.notifyTextBuf.indexOf("\n")) >= 0){
 			const line = d.notifyTextBuf.slice(0, idx).trim();
 			d.notifyTextBuf = d.notifyTextBuf.slice(idx + 1);
 			if(line) handleLine(d, line);
 		}
 
-		// ---- 2) Firmware sends BAT replies WITHOUT newline ----
-		// Example: "BAT:87"
+		// BAT often arrives without newline
 		const t = d.notifyTextBuf.trim();
-		if(
-			t.startsWith("BAT:") &&
-			/^\s*BAT:\s*\d+%?\s*$/.test(t)
-		){
+		if(t.startsWith("BAT:") && /^\s*BAT:\s*\d+%?\s*$/.test(t)){
 			d.notifyTextBuf = "";
 			handleLine(d, t);
 			return;
 		}
 
-		// ---- 3) Safety valve: flush oversized buffer ----
 		if(d.notifyTextBuf.length > 512){
 			const line = d.notifyTextBuf.trim();
 			d.notifyTextBuf = "";
@@ -670,8 +640,7 @@ function handleNotifyFactory(d){
 	};
 }
 
-
-/* ================== UI: Device cards ================== */
+/* ============ UI: Device cards ============ */
 function createDeviceCard(d){
 	const host = document.getElementById("devices");
 	const card = document.createElement("div");
@@ -722,7 +691,6 @@ function createDeviceCard(d){
 	card.appendChild(battRow);
 	card.appendChild(sd);
 	card.appendChild(btns);
-
 	host.appendChild(card);
 
 	const battery = battRow.querySelector(".battery");
@@ -736,19 +704,15 @@ function createDeviceCard(d){
 	d.el = { card, name, battRow, battery, battFill, battPct, sd, btnLS, files, btnConnect, btnRemove };
 
 	btnConnect.onclick = async ()=>{
-		if(d.connected) await disconnectDevice(d);
+		if(d.connected) await disconnectDevice(d, true, false);
 		else await connectDevice(d);
 	};
-
-	btnRemove.onclick = async ()=>{
-		await removeDevice(d);
-	};
+	btnRemove.onclick = async ()=>{ await removeDevice(d); };
 
 	battery.onclick = async ()=>{
 		if(!d.connected) return;
 		await safeWriteText(d, CMD_BATT);
 	};
-
 	btnLS.onclick = async ()=>{
 		if(!d.connected) return;
 		await sdListFiles(d);
@@ -758,13 +722,14 @@ function createDeviceCard(d){
 	return card;
 }
 
-/* ================== Connect/Disconnect per device ================== */
+/* ============ Connect/Disconnect per device ============ */
 async function connectDevice(d){
 	if(d.connecting) return;
 	if(!webBleAvailable()){
 		setStatus("Web Bluetooth not available. Use Bluefy (iOS) or a WebBLE browser.");
 		return;
 	}
+
 	d.connecting = true;
 	d.el.btnConnect.disabled = true;
 	d.el.btnConnect.textContent = "Connecting...";
@@ -785,7 +750,7 @@ async function connectDevice(d){
 
 	d.device.addEventListener("gattserverdisconnected", async ()=>{
 		setStatus(`[${d.el.name.textContent}] Disconnected`);
-		await disconnectDevice(d, true);
+		await disconnectDevice(d, false, true);
 	});
 
 	try{
@@ -810,7 +775,7 @@ async function connectDevice(d){
 		setStatus(`[${d.el.name.textContent}] Connected`);
 		await safeWriteText(d, CMD_BATT);
 
-		// IMPORTANT: if global logging is armed, arm THIS device too (like Python)
+		// If global logging is armed, arm this device too
 		if(loggingArmed){
 			try{
 				await armDeviceForLogging(d);
@@ -819,24 +784,31 @@ async function connectDevice(d){
 				setStatus(`[${d.el.name.textContent}] Could not join logging: ${e}`);
 			}
 		}
-
 	}catch(e){
 		setStatus("Connect failed");
-		await disconnectDevice(d, true);
+		await disconnectDevice(d, false, true);
 	}finally{
 		d.connecting = false;
 		d.el.btnConnect.disabled = false;
 	}
 }
 
-async function disconnectDevice(d, silent=false){
-	// If logging is armed globally, Python behavior is to STOP ALL on drop.
-	// Your code does that in _handle_ble_disconnect(). We mirror it here:
-	if(loggingArmed){
-		await stopLoggingAll();
+/*
+disconnectDevice(d, clickedByUser, fromGattEvent)
+
+Fix: disconnecting ONE device should NOT stop all other devices.
+- If global logging is active, we send STOP only to this device.
+- We only stop global logging if no devices remain connected.
+*/
+async function disconnectDevice(d, clickedByUser=false, fromGattEvent=false){
+	const wasConnected = d.connected;
+
+	// If global logging is active, stop ONLY this device (not everyone)
+	if(loggingArmed && wasConnected){
+		await safeWriteBytes(d, new Uint8Array([ CMD_STOP.charCodeAt(0) ]));
 	}
 
-	// Stop notify
+	// Stop notifications (only if not already torn down by gatt event)
 	try{
 		if(d.txChar && d._notifyHandler){
 			try{
@@ -846,9 +818,9 @@ async function disconnectDevice(d, silent=false){
 		}
 	}catch(_){}
 
-	// Disconnect gatt
+	// Disconnect GATT (avoid calling disconnect() if this was triggered by gatt disconnect event)
 	try{
-		if(d.device && d.device.gatt && d.device.gatt.connected){
+		if(!fromGattEvent && d.device && d.device.gatt && d.device.gatt.connected){
 			d.device.gatt.disconnect();
 		}
 	}catch(_){}
@@ -869,34 +841,39 @@ async function disconnectDevice(d, silent=false){
 	d.el.btnConnect.textContent = "Connect";
 	d.el.name.textContent = (d.device && d.device.name) ? (d.device.name + " (disconnected)") : `TinZr #${d.id} (disconnected)`;
 
-	if(!silent) setStatus(`[${d.el.name.textContent}] Disconnected`);
+	// If global logging is active but NO devices remain, turn it off globally
+	if(loggingArmed){
+		const anyLeft = devices.some(x => x.connected);
+		if(!anyLeft){
+			await stopLoggingAll();
+		}else{
+			// keep global UI ON
+			refreshStopButton();
+		}
+	}
+
+	if(clickedByUser) setStatus(`[${d.el.name.textContent}] Disconnected`);
 }
 
 async function removeDevice(d){
 	try{
 		if(d.connected){
-			await disconnectDevice(d, true);
+			await disconnectDevice(d, false, false);
 		}
 	}catch(_){}
 
-	// remove from array
 	const idx = devices.indexOf(d);
 	if(idx >= 0) devices.splice(idx, 1);
 
-	// remove DOM
-	try{
-		d.el.card.remove();
-	}catch(_){}
+	try{ d.el.card.remove(); }catch(_){}
 
 	refreshCount();
 
-	// If none left connected, force global logging off (Python does this)
 	if(!anyConnected() && loggingArmed){
 		await stopLoggingAll();
 	}
 }
 
-/* ================== SD list per device ================== */
 async function sdListFiles(d){
 	d.lsCollecting = false;
 	d.lsLines = [];
@@ -905,13 +882,12 @@ async function sdListFiles(d){
 	await safeWriteText(d, CMD_SD_LS);
 }
 
-/* ================== GLOBAL UI WIRING ================== */
+/* ============ GLOBAL UI WIRING ============ */
 document.getElementById("btnAdd").onclick = async ()=>{
 	const d = mkDeviceModel();
 	devices.push(d);
 	createDeviceCard(d);
 	refreshCount();
-	// auto-connect on add (same feel as earlier). If you want manual only, remove next line:
 	await connectDevice(d);
 };
 
@@ -922,7 +898,6 @@ document.getElementById("btnStopAll").onclick = async ()=>{
 document.getElementById("toggleGlobal").onclick = async ()=>{
 	const wantOn = !loggingArmed;
 	setToggle(document.getElementById("toggleGlobal"), wantOn);
-
 	if(wantOn) await startLoggingAll();
 	else await stopLoggingAll();
 };
@@ -934,14 +909,11 @@ document.getElementById("btnSetParticipant").onclick = async ()=>{
 		return;
 	}
 	setStatus("Participant set: " + sanitizeSubject(p));
-
-	// Optional: push P: to all connected immediately (Python does when you click Set)
 	if(anyConnected()){
 		await sendCmdAllText("P:"+sanitizeSubject(p));
 	}
 };
 
-/* init */
 refreshCount();
 refreshStopButton();
 
