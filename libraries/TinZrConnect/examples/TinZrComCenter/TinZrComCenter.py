@@ -1,10 +1,12 @@
 # TinZrComCenter.py  (PyQt5 version)
 import os
 import sys
-from PyQt5 import QtWidgets, QtGui
+from PyQt5 import QtWidgets, QtGui, QtCore
 
 from gui.tab_wifi_hub import WifiHubTab
 from gui.tab_commands import CommandsTab   
+
+__VERSION__ = "V1.0.0"
 
 # Use your shared visual style
 try:
@@ -51,7 +53,8 @@ class TinZrComCenterApp(QtWidgets.QMainWindow):
 
         self.notebook = QtWidgets.QTabWidget()
         layout.addWidget(self.notebook)
-
+        
+        
         # Create tabs (same logic: app=self so they can call back if needed)
         self.tab_wifi_hub = WifiHubTab(app=self)
         self.tab_commands = CommandsTab(app=self)
@@ -59,7 +62,30 @@ class TinZrComCenterApp(QtWidgets.QMainWindow):
         # Add tabs
         self.notebook.addTab(self.tab_wifi_hub, "WIFI Hub")
         self.notebook.addTab(self.tab_commands, "Commands")
+            
+        
+        
+        
+        
+        # --------------------------------
+        # Version text in the tab-bar row (top-right)
+        # --------------------------------
+        self.version_label = QtWidgets.QLabel(__VERSION__)
+        self.version_label.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight)
 
+        # Clone app font and slightly reduce size (DPI-safe)
+        font = self.font()
+        font.setPointSizeF(font.pointSizeF() * 0.9)   # try 0.9–1.0
+        self.version_label.setFont(font)
+
+        self.version_label.setStyleSheet("color: #b0b0b0; padding: 0px 8px;")
+
+        self.notebook.setCornerWidget(self.version_label, QtCore.Qt.TopRightCorner)
+        
+        
+        
+        
+        
         # Apply TinZr theme if available
         if apply_tinzr_theme is not None:
             apply_tinzr_theme(self)

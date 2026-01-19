@@ -5,6 +5,7 @@ import socket
 import threading
 import queue
 import time
+import struct
 
 from PyQt5 import QtCore, QtWidgets
 
@@ -381,7 +382,27 @@ class WifiHubTab(QtWidgets.QWidget):
         threading.Thread(target=self._discovery_burst, daemon=True).start()
     
     
-    
+       
+    def _get_preferred_local_ip(self) -> str:
+        """
+        Return the local IP address of the interface that would be used
+        to reach TinZr devices (multicast-aware, network-agnostic).
+        """
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # We do NOT send anything — connect() only selects the route
+            s.connect((self.mcast_group, self.udp_port))
+            return s.getsockname()[0]
+        except Exception:
+            return "0.0.0.0"
+        finally:
+            try:
+                s.close()
+            except Exception:
+                pass
+
+
+
     def _set_device_name(self, ip_str: str, name: str):
         name = (name or "").strip()
         if not name:
@@ -463,32 +484,40 @@ class WifiHubTab(QtWidgets.QWidget):
         self._log("[HUB] Stopped.")
 
 
+
     # ------------------------------------------------------------------
-    # UDP listener (same logic, but HELLO is now silent)
+    # UDP listener (Windows-safe multicast + filter non-TinZr peers)
     # ------------------------------------------------------------------
     def _udp_listener_thread(self):
+        # Pick the correct local NIC IP (Wi-Fi) so multicast works on Windows
+        local_ip = self._get_preferred_local_ip()
+        self._log(f"[UDP] Using local interface IP: {local_ip}")
+
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
+        # CRITICAL: bind to Wi-Fi interface, not 0.0.0.0
         try:
-            sock.bind(("", self.udp_port))
+            sock.bind((local_ip, self.udp_port))
         except OSError as e:
-            self._log(f"[UDP] ERROR binding UDP port {self.udp_port}: {e}")
+            self._log(f"[UDP] ERROR binding UDP {local_ip}:{self.udp_port}: {e}")
             self._set_status(f"UDP bind error: {e}", "red")
             return
 
-        # Join multicast group
+        # Join multicast group on that interface (Windows-safe)
         try:
-            mreq = socket.inet_aton(self.mcast_group) + socket.inet_aton("0.0.0.0")
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-            self._log(f"[UDP] Joined multicast group {self.mcast_group}")
-        except OSError as e:
-            self._log(
-                f"[UDP] WARNING: Could not join multicast group {self.mcast_group}: {e}"
+            mreq = struct.pack(
+                "4s4s",
+                socket.inet_aton(self.mcast_group),
+                socket.inet_aton(local_ip),
             )
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+            self._log(f"[UDP] Joined multicast group {self.mcast_group} on {local_ip}")
+        except OSError as e:
+            self._log(f"[UDP] WARNING: Could not join multicast group {self.mcast_group}: {e}")
 
         self.udp_sock = sock
-        self._log(f"[UDP] Listening on 0.0.0.0:{self.udp_port}")
+        self._log(f"[UDP] Listening on {local_ip}:{self.udp_port}")
 
         sock.settimeout(0.5)
 
@@ -503,20 +532,29 @@ class WifiHubTab(QtWidgets.QWidget):
             ip, port = addr
             text = data.decode("utf-8", errors="replace").strip()
 
-            # HELLO from node: "HELLO" or "HELLO <name>"
+            # ----------------------------
+            # FILTERS (prevents TinZr-1 / 192.168.56.1 ghost peer)
+            # ----------------------------
+            # Ignore packets from this PC
+            if ip == local_ip:
+                continue
+
+            # Only accept peers on the TinZr Wi-Fi subnet (adjust if your subnet changes)
+            if not ip.startswith("10.0.0."):
+                continue
+
+            # ----------------------------
+            # Existing logic
+            # ----------------------------
             if text.startswith("HELLO"):
-                # Do NOT log HELLO; just learn the peer quietly
                 parts = text.split(maxsplit=1)
                 name = parts[1] if len(parts) > 1 else None
                 self._learn_peer(ip, name)
                 try:
                     sock.sendto(b"HUB-ACK", addr)
-                    # also do NOT log HUB-ACK for HELLO
                 except OSError as e:
-                    # only log if something goes wrong
                     self._log(f"[UDP] HUB-ACK send failed to {self._peer_tag(ip)}: {e}")
             else:
-                # Normal message: log + update last_seen
                 self._log(f"[UDP RX {self._peer_tag(ip)}:{port}] {text!r}")
                 self._learn_peer(ip)
 
@@ -525,6 +563,18 @@ class WifiHubTab(QtWidgets.QWidget):
         except Exception:
             pass
         self._log("[UDP] Listener stopped.")
+
+
+
+
+
+
+
+
+
+
+
+
 
 
     # ------------------------------------------------------------------

@@ -1,4 +1,4 @@
-#include "TinZrWiFiCom.h"
+#include "TinZrComCenter.h"
 #include <string.h>
 
 TinZrWiFiCom* TinZrWiFiCom::_self = nullptr;

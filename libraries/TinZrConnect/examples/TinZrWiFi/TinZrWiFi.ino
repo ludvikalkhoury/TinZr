@@ -137,8 +137,8 @@ void setup() {
 	TinZr.begin(50);
 
 	TinZrWiFiConfig wifi_cfg;
-	wifi_cfg.ssid = "Ludvik";
-	wifi_cfg.pass = "Lud12345";
+	wifi_cfg.ssid = "Nestico";
+	wifi_cfg.pass = "alessia1";
 	wifi_cfg.hostname = "tinzr-wifi";
 
 	TinZrWiFi.begin(wifi_cfg);
