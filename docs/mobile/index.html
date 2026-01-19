@@ -636,22 +636,40 @@ function handleNotifyFactory(d){
 	return function(event){
 		const chunk = new TextDecoder().decode(event.target.value);
 		d.notifyTextBuf += chunk;
+
+		// normalize CRLF → LF
 		d.notifyTextBuf = d.notifyTextBuf.replace(/\r/g, "");
 
 		let idx;
+
+		// ---- 1) Normal newline-based parsing ----
 		while((idx = d.notifyTextBuf.indexOf("\n")) >= 0){
 			const line = d.notifyTextBuf.slice(0, idx).trim();
-			d.notifyTextBuf = d.notifyTextBuf.slice(idx+1);
+			d.notifyTextBuf = d.notifyTextBuf.slice(idx + 1);
 			if(line) handleLine(d, line);
 		}
 
+		// ---- 2) Firmware sends BAT replies WITHOUT newline ----
+		// Example: "BAT:87"
+		const t = d.notifyTextBuf.trim();
+		if(
+			t.startsWith("BAT:") &&
+			/^\s*BAT:\s*\d+%?\s*$/.test(t)
+		){
+			d.notifyTextBuf = "";
+			handleLine(d, t);
+			return;
+		}
+
+		// ---- 3) Safety valve: flush oversized buffer ----
 		if(d.notifyTextBuf.length > 512){
 			const line = d.notifyTextBuf.trim();
 			d.notifyTextBuf = "";
 			if(line) handleLine(d, line);
 		}
-	}
+	};
 }
+
 
 /* ================== UI: Device cards ================== */
 function createDeviceCard(d){
