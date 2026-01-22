@@ -87,6 +87,11 @@ void loop() {
 
 
 
+Copyright (c) 2026 Ludvik Alkhoury
+
+This software is licensed under the GNU General Public License v3.0.
+Commercial licensing options are available upon request.
+
 
 
 
