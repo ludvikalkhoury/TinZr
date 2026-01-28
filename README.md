@@ -95,6 +95,9 @@ Commercial licensing options are available upon request.
 
 
 
+![OSHW Facts](docs/oshwa_facts.svg)
+
+
 
 
 
