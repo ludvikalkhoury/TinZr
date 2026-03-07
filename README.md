@@ -3,6 +3,11 @@
 This repository contains the **TinZr**, an ESP32-C3-based custom board definition for the Arduino IDE.  
 It provides a clean, Boards-Manager-installable package so anyone can use your board with one simple URL.
 
+## Publication Status
+The manuscript describing this work is currently under peer review.
+The materials in this repository correspond to the submitted version of the work.
+Please refrain from redistributing or reproducing this work until the peer-review process is complete.
+
 ---
 ## Pinout
 ![TinZr ESP32-C3 Pinout](https://github.com/ludvikalkhoury/TinZr/blob/main/docs/TinZr_Pinout.png?raw=true)
@@ -96,6 +101,7 @@ Commercial licensing options are available upon request.
 
 
 ![OSHW Facts](docs/oshwa_facts.svg)
+
 
 
 
