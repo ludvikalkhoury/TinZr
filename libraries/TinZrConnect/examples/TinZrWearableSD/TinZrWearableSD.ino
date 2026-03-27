@@ -88,6 +88,13 @@
  */
 
 
+// !!!!!!!!!!!!
+// !!!!NOTE!!!!
+// !!!!!!!!!!!!
+// Before you use this code, keep in mind that there could be of data drift and de-synchornization since different TinZr do not run at the same clock. 
+// If this is a limitation, then consider using TinZrWearable.ino instead (which sends data over BLE to a computer).
+
+
 #include <Arduino.h>
 #include "TinZrWearableSD.h"
 
