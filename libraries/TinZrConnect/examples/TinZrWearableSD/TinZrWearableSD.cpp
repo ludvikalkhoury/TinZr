@@ -52,6 +52,10 @@ static const unsigned long BATT_PERIOD_MS = 5UL * 60UL * 1000UL; // 5 minutes
 // ====== SD hot-plug probing ======
 static const unsigned long SD_PROBE_PERIOD_MS = 2000UL; // try every 2 seconds
 
+static uint64_t _estimate_pc_time_us(uint64_t anchor_pc_us, uint32_t anchor_local_us, uint32_t now_local_us) {
+	return anchor_pc_us + (uint32_t)(now_local_us - anchor_local_us);
+}
+
 // =============================================================
 // Battery helper
 // =============================================================
@@ -133,6 +137,47 @@ static int64_t _days_from_civil(int y, unsigned m, unsigned d) {
 	return (int64_t)era * 146097 + (int64_t)doe - 719468;
 }
 
+static void _civil_from_days(int64_t z, int& y, unsigned& m, unsigned& d) {
+	z += 719468;
+	const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+	const unsigned doe = (unsigned)(z - era * 146097);
+	const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+	y = (int)yoe + (int)(era * 400);
+	const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+	const unsigned mp = (5 * doy + 2) / 153;
+	d = doy - (153 * mp + 2) / 5 + 1;
+	m = mp + (mp < 10 ? 3 : -9);
+	y += (m <= 2);
+}
+
+static void _format_epoch_us_iso(uint64_t epoch_us, char* out, size_t out_size) {
+	const uint64_t total_seconds = epoch_us / 1000000ULL;
+	const uint32_t micros = (uint32_t)(epoch_us % 1000000ULL);
+	const int64_t days = (int64_t)(total_seconds / 86400ULL);
+	const uint32_t sec_of_day = (uint32_t)(total_seconds % 86400ULL);
+
+	int year = 1970;
+	unsigned month = 1;
+	unsigned day = 1;
+	_civil_from_days(days, year, month, day);
+
+	const uint32_t hour = sec_of_day / 3600UL;
+	const uint32_t minute = (sec_of_day % 3600UL) / 60UL;
+	const uint32_t second = sec_of_day % 60UL;
+
+	snprintf(
+		out, out_size,
+		"%04d-%02u-%02uT%02lu:%02lu:%02lu.%06lu",
+		year,
+		month,
+		day,
+		(unsigned long)hour,
+		(unsigned long)minute,
+		(unsigned long)second,
+		(unsigned long)micros
+	);
+}
+
 static bool _is_digit(char c) { return (c >= '0' && c <= '9'); }
 
 static bool _all_digits(const String& s) {
@@ -143,57 +188,66 @@ static bool _all_digits(const String& s) {
 }
 
 // Parse formats like (examples):
-//   "2026-01-09T18:38:41:598.8028"
-//   "2026-01-09T18-38-41-598-8028"
-//   "2026-01-09_18-38-41_598.8028"
-// returns true if parsed; outputs epoch ms (no timezone offset, local-ish)
-static bool _parse_pc_timestr_to_epoch_ms(const String& in, uint64_t& out_ms) {
-	int vals[8] = {0};
+//   "2026-01-09T18:38:41.598802"
+//   "2026-01-09_18:38:41.598802"
+//   "2026-01-09 18:38:41.598802"
+// returns true if parsed; outputs epoch us (no timezone offset, local-ish)
+static bool _parse_pc_timestr_to_epoch_us(const String& in, uint64_t& out_us) {
+	String vals[8];
 	int got = 0;
-
 	String s = in;
 	s.trim();
 	if (!s.length()) return false;
 
-	int cur = 0;
-	bool in_num = false;
+	String cur;
 	for (size_t i = 0; i < s.length(); ++i) {
 		char c = s.charAt(i);
 		if (_is_digit(c)) {
-			in_num = true;
-			cur = cur * 10 + (c - '0');
+			cur += c;
 		} else {
-			if (in_num) {
+			if (cur.length()) {
 				if (got < 8) vals[got++] = cur;
-				cur = 0;
-				in_num = false;
+				cur = "";
 			}
 		}
 	}
-	if (in_num) {
+	if (cur.length()) {
 		if (got < 8) vals[got++] = cur;
 	}
 
-	if (got < 7) return false;
+	if (got < 6) return false;
 
-	int Y  = vals[0];
-	int Mo = vals[1];
-	int D  = vals[2];
-	int H  = vals[3];
-	int Mi = vals[4];
-	int Se = vals[5];
-	int Ms = vals[6];
+	int Y  = vals[0].toInt();
+	int Mo = vals[1].toInt();
+	int D  = vals[2].toInt();
+	int H  = vals[3].toInt();
+	int Mi = vals[4].toInt();
+	int Se = vals[5].toInt();
 
 	if (Y < 1970 || Mo < 1 || Mo > 12 || D < 1 || D > 31) return false;
 	if (H < 0 || H > 23 || Mi < 0 || Mi > 59 || Se < 0 || Se > 60) return false;
-	if (Ms < 0) Ms = 0;
-	if (Ms > 999) Ms = Ms % 1000;
+
+	uint64_t frac_us = 0;
+	if (got >= 7) {
+		String frac = vals[6];
+		if (frac.length() > 6) frac.remove(6);
+		while (frac.length() < 6) frac += '0';
+		frac_us = frac.toInt();
+	}
 
 	int64_t days = _days_from_civil(Y, (unsigned)Mo, (unsigned)D);
 	int64_t sec  = days * 86400LL + (int64_t)H * 3600LL + (int64_t)Mi * 60LL + (int64_t)Se;
-	int64_t ms   = sec * 1000LL + (int64_t)Ms;
+	int64_t us   = sec * 1000000LL + (int64_t)frac_us;
 
-	out_ms = (ms < 0) ? 0ULL : (uint64_t)ms;
+	out_us = (us < 0) ? 0ULL : (uint64_t)us;
+	return true;
+}
+
+// returns true if parsed; outputs epoch ms (no timezone offset, local-ish)
+static bool _parse_pc_timestr_to_epoch_ms(const String& in, uint64_t& out_ms) {
+	uint64_t out_us = 0;
+	if (!_parse_pc_timestr_to_epoch_us(in, out_us)) return false;
+	out_ms = out_us / 1000ULL;
 	return true;
 }
 
@@ -262,11 +316,12 @@ static void _write_log_metadata_header(
 	const String& participant,
 	const String& pcAnchorStr,
 	bool hasPcAnchorStr,
-	uint64_t pcAnchorMs,
-	unsigned long startLocalMs
+	uint64_t pcAnchorUs,
+	uint32_t startLocalUs
 ) {
-	const float fs_hz = (cfg.sample_interval_ms > 0)
-		? (1000.0f / (float)cfg.sample_interval_ms)
+	const uint32_t sample_interval_us = (uint32_t)cfg.sample_interval_ms * 1000UL;
+	const float fs_hz = (sample_interval_us > 0)
+		? (1000000.0f / (float)sample_interval_us)
 		: 0.0f;
 
 	TinZrSD.writeLine("# ================================================");
@@ -278,12 +333,13 @@ static void _write_log_metadata_header(
 	if (hasPcAnchorStr && pcAnchorStr.length()) {
 		TinZrSD.writeLine(String("# start_time_str: ") + pcAnchorStr);
 	} else {
-		TinZrSD.writeLine(String("# start_time_epoch_ms: ") + String((unsigned long long)pcAnchorMs));
+		TinZrSD.writeLine(String("# start_time_epoch_us: ") + String((unsigned long long)pcAnchorUs));
 	}
 
 	TinZrSD.writeLine(String("# sample_interval_ms: ") + String(cfg.sample_interval_ms));
+	TinZrSD.writeLine(String("# sample_interval_us: ") + String((unsigned long)sample_interval_us));
 	TinZrSD.writeLine(String("# nominal_fs_hz: ") + String(fs_hz, 3));
-	TinZrSD.writeLine(String("# start_local_millis: ") + String(startLocalMs));
+	TinZrSD.writeLine(String("# start_local_micros: ") + String((unsigned long)startLocalUs));
 	
 	// ---- IMU metadata (matches TinZrCore.cpp config) ----
 	TinZrSD.writeLine("# imu_accel_units: g");
@@ -408,7 +464,7 @@ void TinZrWearableSDClass::begin(const TinZrWearableSDConfig& cfg) {
 	// Default mode and streaming
 	_mode         = TinZrWearSDMode::BLE_ONLY;
 	_streaming    = false;
-	_lastSampleMs = 0;
+	_lastSampleUs = 0;
 
 	sFrameCount         = 0;
 	sLastHr             = 0;
@@ -421,9 +477,9 @@ void TinZrWearableSDClass::begin(const TinZrWearableSDConfig& cfg) {
 	_hasPcAnchorStr = false;
 
 	_hasPcAnchor = false;
-	_pcAnchorMs = 0;
-	_pcAnchorLocalMs = 0;
-	_lastHeartbeatMs = 0;
+	_pcAnchorUs = 0;
+	_pcAnchorLocalUs = 0;
+	_lastHeartbeatUs = 0;
 
 	_recordArmed = false;
 	_recording = false;
@@ -460,6 +516,22 @@ void TinZrWearableSDClass::handle() {
 	_probeSDHotplug(millis());
 
 	_handleBLE();
+
+	if (_pendingHeartbeat) {
+		uint64_t pendingPcAnchorUs = 0;
+		noInterrupts();
+		pendingPcAnchorUs = _pendingPcAnchorUs;
+		_pendingHeartbeat = false;
+		interrupts();
+
+		const uint32_t now_us = micros();
+		noInterrupts();
+		_pcAnchorUs = pendingPcAnchorUs;
+		_pcAnchorLocalUs = now_us;
+		_lastHeartbeatUs = now_us;
+		_hasPcAnchor = true;
+		interrupts();
+	}
 
 #if TINZR_ENABLE_BLE
 	if (_sdListPending) {
@@ -897,23 +969,26 @@ void TinZrWearableSDClass::_handleBleCommand(const uint8_t* data, size_t len) {
 		String t = s.substring(2);
 		t.trim();
 
-		uint64_t pc_ms = 0;
+		uint64_t pc_time_us = 0;
 
 		if (_all_digits(t)) {
 			for (size_t i = 0; i < t.length(); ++i) {
-				pc_ms = pc_ms * 10ULL + (uint64_t)(t.charAt(i) - '0');
+				pc_time_us = pc_time_us * 10ULL + (uint64_t)(t.charAt(i) - '0');
+			}
+			if (pc_time_us < 100000000000000ULL) {
+				pc_time_us *= 1000ULL; // backward compatibility for epoch-ms senders
 			}
 		} else {
-			if (!_parse_pc_timestr_to_epoch_ms(t, pc_ms)) {
+			if (!_parse_pc_timestr_to_epoch_us(t, pc_time_us)) {
 				Serial.println("⚠️ T: parse failed (ignored)");
 				return;
 			}
 		}
 
-		_pcAnchorMs      = pc_ms;
-		_pcAnchorLocalMs = millis();
-		_lastHeartbeatMs = _pcAnchorLocalMs;
-		_hasPcAnchor     = true;
+		noInterrupts();
+		_pendingPcAnchorUs = pc_time_us;
+		_pendingHeartbeat = true;
+		interrupts();
 
 		return;
 	}
@@ -967,7 +1042,7 @@ void TinZrWearableSDClass::_applyStreamingChange(bool enable) {
 
 		_streaming          = true;
 		sFrameCount         = 0;
-		_lastSampleMs       = 0;
+		_lastSampleUs       = 0;
 		sLastHr             = 0;
 		sLastSpo2           = 0;
 		sLastHrSpo2UpdateMs = 0;
@@ -983,10 +1058,13 @@ void TinZrWearableSDClass::_applyStreamingChange(bool enable) {
 
 // ================== STREAMING ===================
 void TinZrWearableSDClass::_handleStreaming() {
-	const unsigned long now = millis();
+	const uint32_t now_us = micros();
+	const unsigned long now_ms = millis();
+	const uint32_t sample_interval_us = (uint32_t)_cfg.sample_interval_ms * 1000UL;
 
-	if (_lastSampleMs != 0 && (now - _lastSampleMs) < _cfg.sample_interval_ms) return;
-	_lastSampleMs = now;
+	if (sample_interval_us == 0) return;
+	if (_lastSampleUs != 0 && (uint32_t)(now_us - _lastSampleUs) < sample_interval_us) return;
+	_lastSampleUs = now_us;
 
 	if (!_imuReady) return;
 
@@ -994,8 +1072,8 @@ void TinZrWearableSDClass::_handleStreaming() {
 	const bool heartbeat_ok =
 		_recordArmed &&
 		_hasPcAnchor &&
-		(_lastHeartbeatMs != 0) &&
-		(now - _lastHeartbeatMs) <= HEARTBEAT_TIMEOUT_MS;
+		(_lastHeartbeatUs != 0) &&
+		(uint32_t)(now_us - _lastHeartbeatUs) <= HEARTBEAT_TIMEOUT_US;
 
 	// Start SD recording automatically when heartbeat_ok
 	if (heartbeat_ok && !_recording) {
@@ -1011,7 +1089,7 @@ void TinZrWearableSDClass::_handleStreaming() {
 				String safeTs = _sanitize_pc_time_for_filename(_pcAnchorStr);
 				base = safe + "__" + safeTs;
 			} else {
-				base = safe + "__" + String((unsigned long long)_pcAnchorMs);
+				base = safe + "__" + String((unsigned long long)(_pcAnchorUs / 1000ULL));
 			}
 
 			Serial.print("📝 SD start: ");
@@ -1037,12 +1115,12 @@ void TinZrWearableSDClass::_handleStreaming() {
 					_participant,
 					_pcAnchorStr,
 					_hasPcAnchorStr,
-					_pcAnchorMs,
-					millis()  // OK to log for reference, but NOT used for t_ms
+					_pcAnchorUs,
+					now_us
 				);
 
 				// CSV header
-				TinZrSD.writeLine("t_ms,red,ir,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,batt_pct,hr_bpm,spo2_pct,sync_trigger");
+				TinZrSD.writeLine("t_ms,pc_time_iso,red,ir,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,batt_pct,hr_bpm,spo2_pct,sync_pc_time_iso");
 
 #if TINZR_ENABLE_BLE
 				if (_bleStarted && _ble.connected()) {
@@ -1105,8 +1183,8 @@ void TinZrWearableSDClass::_handleStreaming() {
 	}
 
 	// Battery refresh (every 5 min or forced)
-	if (sLastBattSampleMs == 0 || (now - sLastBattSampleMs) >= BATT_PERIOD_MS) {
-		sLastBattSampleMs = now;
+	if (sLastBattSampleMs == 0 || (now_ms - sLastBattSampleMs) >= BATT_PERIOD_MS) {
+		sLastBattSampleMs = now_ms;
 		sLastBattPct      = read_battery_pct();
 	}
 
@@ -1128,27 +1206,45 @@ void TinZrWearableSDClass::_handleStreaming() {
 
 	// Write to SD
 	if (_recording && TinZrSD.logOpen()) {
-		
-		uint64_t t_ms = (uint64_t)_sampleIdx * (uint64_t)_cfg.sample_interval_ms;
+		uint64_t pcAnchorUs = 0;
+		uint32_t pcAnchorLocalUs = 0;
+		uint32_t lastHeartbeatUs = 0;
+		noInterrupts();
+		pcAnchorUs = _pcAnchorUs;
+		pcAnchorLocalUs = _pcAnchorLocalUs;
+		lastHeartbeatUs = _lastHeartbeatUs;
+		interrupts();
+
+		const uint64_t pc_time_us = _estimate_pc_time_us(pcAnchorUs, pcAnchorLocalUs, now_us);
+		const uint64_t t_ms = (uint64_t)_sampleIdx * (uint64_t)_cfg.sample_interval_ms;
 		_sampleIdx++;
 
 
-		char line[220];
+		char pc_time_iso[32];
+		char sync_pc_time_iso[32];
+		char line[320];
 
-		// hb = 1 when we receive a fresh heartbeat (T:) within this sample interval, else 0
-		uint8_t hb = 0;
-		if (_lastHeartbeatMs != 0) {
-			// Mark hb=1 only for a short window right after T: arrives
-			const unsigned long dt = now - _lastHeartbeatMs;
-			if (dt <= (unsigned long)_cfg.sample_interval_ms) {
-				hb = 1;
+		// Log the exact heartbeat anchor on the sample nearest to its arrival, else 0.
+		uint64_t sync_pc_time_us = 0;
+		if (lastHeartbeatUs != 0) {
+			const uint32_t dt_us = (uint32_t)(now_us - lastHeartbeatUs);
+			if (dt_us <= sample_interval_us) {
+				sync_pc_time_us = pcAnchorUs;
 			}
+		}
+
+		_format_epoch_us_iso(pc_time_us, pc_time_iso, sizeof(pc_time_iso));
+		if (sync_pc_time_us != 0) {
+			_format_epoch_us_iso(sync_pc_time_us, sync_pc_time_iso, sizeof(sync_pc_time_iso));
+		} else {
+			sync_pc_time_iso[0] = '\0';
 		}
 
 		snprintf(
 			line, sizeof(line),
-			"%llu,%lu,%lu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%u,%u,%u,%u",
+			"%llu,%s,%lu,%lu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%u,%u,%u,%s",
 			(unsigned long long)t_ms,
+			pc_time_iso,
 			(unsigned long)red_raw,
 			(unsigned long)ir_raw,
 			(double)imu.ax_g, (double)imu.ay_g, (double)imu.az_g,
@@ -1156,15 +1252,15 @@ void TinZrWearableSDClass::_handleStreaming() {
 			(unsigned)sLastBattPct,
 			(unsigned)sLastHr,
 			(unsigned)sLastSpo2,
-			(unsigned)hb
+			sync_pc_time_iso
 		);
 
 		TinZrSD.writeLine(String(line));
 
 		static unsigned long lastFlush = 0;
-		if (lastFlush == 0 || (now - lastFlush) >= 1000UL) {
+		if (lastFlush == 0 || (now_ms - lastFlush) >= 1000UL) {
 			TinZrSD.flush();
-			lastFlush = now;
+			lastFlush = now_ms;
 		}
 	}
 }
@@ -1182,8 +1278,8 @@ void TinZrWearableSDClass::_updateLED() {
 	const bool heartbeat_ok =
 		_recordArmed &&
 		_hasPcAnchor &&
-		(_lastHeartbeatMs != 0) &&
-		(now - _lastHeartbeatMs) <= HEARTBEAT_TIMEOUT_MS;
+		(_lastHeartbeatUs != 0) &&
+		(uint32_t)(micros() - _lastHeartbeatUs) <= HEARTBEAT_TIMEOUT_US;
 
 	// 🔴 Highest priority: SD missing → FAIL_BLINK (red blink) forever until reinserted
 	if (!_sdReady) {

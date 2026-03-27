@@ -49,9 +49,9 @@ private:
 	bool _imuReady     = false;  // IMU present/configured
 	bool _ppgReady     = false;  // PPG present/configured (optional)
 
-	bool          _streaming    = false;
-	unsigned long _lastSampleMs = 0;
-	bool          _wasSoftOn    = false;
+	bool     _streaming    = false;
+	uint32_t _lastSampleUs = 0;
+	bool     _wasSoftOn    = false;
 
 	// ===== SD logging controlled by PC heartbeat =====
 	bool     _sdReady             = false;
@@ -59,19 +59,20 @@ private:
 	bool     _recording           = false;   // actual: armed + heartbeat OK
 	String   _participant         = "";
 
-	uint32_t _lastHeartbeatMs     = 0;       // local millis when last T: received
-	uint32_t _pcAnchorLocalMs     = 0;       // local millis corresponding to _pcAnchorMs
-	uint64_t _pcAnchorMs          = 0;       // PC epoch ms received in T:
+	uint32_t _lastHeartbeatUs     = 0;       // local micros when last T: received
+	uint32_t _pcAnchorLocalUs     = 0;       // local micros corresponding to _pcAnchorUs
+	uint64_t _pcAnchorUs          = 0;       // PC epoch us received in T:
 	bool     _hasPcAnchor         = false;
 	uint32_t _sampleIdx 					= 0;
-
 
 	// --- deferred BLE actions (do NOT notify inside onWrite) ---
 	volatile bool _pendingSdList = false;
 	volatile bool _pendingBattReply = false;
 	volatile bool _pendingStartGet = false;
+	volatile bool _pendingHeartbeat = false;
 
 	String _pendingGetName;
+	uint64_t _pendingPcAnchorUs = 0;
 
 
 	// Store the *string* timestamp from X: for filename + header
@@ -86,6 +87,7 @@ private:
 
 	static constexpr uint32_t HEARTBEAT_PERIOD_MS  = 5000UL;
 	static constexpr uint32_t HEARTBEAT_TIMEOUT_MS = 6500UL; // stop logging if heartbeat missing
+	static constexpr uint32_t HEARTBEAT_TIMEOUT_US = HEARTBEAT_TIMEOUT_MS * 1000UL;
 
 	// Internal handlers
 	static TinZrWearableSDClass* _self;

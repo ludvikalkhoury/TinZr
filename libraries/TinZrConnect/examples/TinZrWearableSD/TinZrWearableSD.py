@@ -41,7 +41,7 @@ CMD_SD_NAKP = "NAK:"
 
 CMD_EXP_META_PREFIX = "X:"
 
-HEARTBEAT_PERIOD_S = 5.0
+HEARTBEAT_PERIOD_S = 1.0
 BATT_POLL_MS = 10 * 60 * 1000
 
 STATUS_FIXED_CHARS = 45
@@ -1400,9 +1400,7 @@ class TinZrWearableSD(QtWidgets.QWidget):
 	def _build_experiment_meta_payload(self, device_alias: str) -> bytes:
 		subject = self._sanitize_subject(self.edit_participant.text().strip())
 		now = datetime.now()
-		ms = now.microsecond // 1000
-		micro4 = now.microsecond % 10000
-		stamp = f"{now:%Y-%m-%dT%H:%M:%S}:{ms:03d}.{micro4:04d}"
+		stamp = now.strftime("%Y-%m-%dT%H:%M:%S.%f")
 		alias_ = self._sanitize_subject(device_alias or "TinZr")
 		return f"{CMD_EXP_META_PREFIX} sub-{subject}|device-{alias_}|{stamp}".encode("utf-8")
 
@@ -1456,12 +1454,16 @@ class TinZrWearableSD(QtWidgets.QWidget):
 				self._invoke(self, "_ui_set_record_toggle", False, True)
 				return
 
-			for addr, info in list(self.devices.items()):
-				if info.get("connected"):
-					await self._arm_device_for_logging(addr)
+			tasks = [
+				self._arm_device_for_logging(addr)
+				for addr, info in list(self.devices.items())
+				if info.get("connected")
+			]
+			if tasks:
+				await asyncio.gather(*tasks)
 
 			self._logging_armed = True
-			self._log("Logging armed. PC timestamps every 5s.")
+			self._log("Logging armed. PC epoch heartbeats every 1s.")
 			self._start_heartbeat_ui()
 
 		except Exception as e:
@@ -1490,11 +1492,9 @@ class TinZrWearableSD(QtWidgets.QWidget):
 			return
 
 		now = datetime.now()
-		ms = now.microsecond // 1000
-		micro4 = now.microsecond % 10000
-		stamp = f"{now:%Y-%m-%dT%H:%M:%S}:{ms:03d}.{micro4:04d}"
-		stamp_print = f"{now:%Y-%m-%d %H:%M:%S}"
-		cmd = f"T:{stamp}".encode("utf-8")
+		stamp_print = now.strftime("%Y-%m-%d %H:%M:%S.%f")
+		stamp_tx = now.strftime("%Y-%m-%d_%H:%M:%S.%f")
+		cmd = f"T:{stamp_tx}".encode("utf-8")
 
 		self.label_hb.setText(f"Sync. trigger: {stamp_print}")
 		self._run_coro(self._send_cmd_all(cmd))
@@ -1755,14 +1755,20 @@ class TinZrWearableSD(QtWidgets.QWidget):
 
 
 	async def _send_cmd_all(self, payload: bytes):
+		tasks = []
 		for addr, info in list(self.devices.items()):
 			client: BleakClient = info.get("client")
 			if not client or not client.is_connected:
 				continue
-			try:
-				await client.write_gatt_char(TINZR_BLE_RX_CHAR_UUID, payload, response=False)
-			except Exception:
-				pass
+			tasks.append(self._send_cmd_to_device(addr, payload, response=False))
+
+		if not tasks:
+			return
+
+		results = await asyncio.gather(*tasks, return_exceptions=True)
+		for result in results:
+			if isinstance(result, Exception):
+				print(f"BROADCAST SEND ERROR: {result}")
 
 	# =========================
 	# Close
