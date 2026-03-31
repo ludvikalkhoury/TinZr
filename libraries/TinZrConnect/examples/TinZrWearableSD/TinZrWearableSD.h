@@ -12,6 +12,7 @@ struct TinZrWearableSDConfig {
 	const char* hostname           = "TinZrWearableSD";
 	// Sampling interval in ms (4 ms ≈ 250 Hz target, resampled to 240 Hz on hub)
 	uint16_t    sample_interval_ms = 4;
+	bool        enable_pc_clock_drift_correction = true;
 
 	// nullptr => use TINZR_SD_LOG_DIR (from TinZrConfig.h)
 	const char* sd_log_dir         = nullptr;
@@ -64,6 +65,12 @@ private:
 	uint64_t _pcAnchorUs          = 0;       // PC epoch us received in T:
 	bool     _hasPcAnchor         = false;
 	uint32_t _sampleIdx 					= 0;
+	double   _pcUsPerLocalUs      = 1.0;     // estimated clock ratio from heartbeat history
+	bool     _hasClockScale       = false;
+	uint64_t _prevPcAnchorUs      = 0;
+	uint32_t _prevPcAnchorLocalUs = 0;
+	uint64_t _recordStartPcUs     = 0;
+	uint32_t _recordStartLocalUs  = 0;
 
 	// --- deferred BLE actions (do NOT notify inside onWrite) ---
 	volatile bool _pendingSdList = false;
@@ -85,7 +92,6 @@ private:
 	// NEW: whether we already wrote the metadata header for the current file
 	bool     _logHeaderWritten    = false;
 
-	static constexpr uint32_t HEARTBEAT_PERIOD_MS  = 5000UL;
 	static constexpr uint32_t HEARTBEAT_TIMEOUT_MS = 6500UL; // stop logging if heartbeat missing
 	static constexpr uint32_t HEARTBEAT_TIMEOUT_US = HEARTBEAT_TIMEOUT_MS * 1000UL;
 

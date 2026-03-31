@@ -51,9 +51,21 @@ static const unsigned long BATT_PERIOD_MS = 5UL * 60UL * 1000UL; // 5 minutes
 
 // ====== SD hot-plug probing ======
 static const unsigned long SD_PROBE_PERIOD_MS = 2000UL; // try every 2 seconds
+static const unsigned long SD_IDLE_LIVENESS_CHECK_PERIOD_MS = 5000UL;
 
 static uint64_t _estimate_pc_time_us(uint64_t anchor_pc_us, uint32_t anchor_local_us, uint32_t now_local_us) {
 	return anchor_pc_us + (uint32_t)(now_local_us - anchor_local_us);
+}
+
+static uint64_t _estimate_pc_time_us_scaled(
+	uint64_t anchor_pc_us,
+	uint32_t anchor_local_us,
+	uint32_t now_local_us,
+	double pc_us_per_local_us
+) {
+	const uint32_t dt_local_us = (uint32_t)(now_local_us - anchor_local_us);
+	const double dt_pc_us = (double)dt_local_us * pc_us_per_local_us;
+	return anchor_pc_us + (uint64_t)(dt_pc_us + 0.5);
 }
 
 // =============================================================
@@ -317,13 +329,10 @@ static void _write_log_metadata_header(
 	const String& pcAnchorStr,
 	bool hasPcAnchorStr,
 	uint64_t pcAnchorUs,
-	uint32_t startLocalUs
+	uint32_t startLocalUs,
+	double pcUsPerLocalUs,
+	bool hasClockScale
 ) {
-	const uint32_t sample_interval_us = (uint32_t)cfg.sample_interval_ms * 1000UL;
-	const float fs_hz = (sample_interval_us > 0)
-		? (1000000.0f / (float)sample_interval_us)
-		: 0.0f;
-
 	TinZrSD.writeLine("# ================================================");
 	TinZrSD.writeLine("# TinZrWearableSD Log");
 	TinZrSD.writeLine("# ================================================");
@@ -331,15 +340,17 @@ static void _write_log_metadata_header(
 	TinZrSD.writeLine(String("# participant: ") + (participant.length() ? participant : "anon"));
 
 	if (hasPcAnchorStr && pcAnchorStr.length()) {
-		TinZrSD.writeLine(String("# start_time_str: ") + pcAnchorStr);
+		TinZrSD.writeLine(String("# start_time_from_pc_datetime: ") + pcAnchorStr);
 	} else {
-		TinZrSD.writeLine(String("# start_time_epoch_us: ") + String((unsigned long long)pcAnchorUs));
+		TinZrSD.writeLine(String("# start_time_from_pc_us: ") + String((unsigned long long)pcAnchorUs));
 	}
 
-	TinZrSD.writeLine(String("# sample_interval_ms: ") + String(cfg.sample_interval_ms));
-	TinZrSD.writeLine(String("# sample_interval_us: ") + String((unsigned long)sample_interval_us));
-	TinZrSD.writeLine(String("# nominal_fs_hz: ") + String(fs_hz, 3));
-	TinZrSD.writeLine(String("# start_local_micros: ") + String((unsigned long)startLocalUs));
+	TinZrSD.writeLine(String("# time_sample_interval_ms: ") + String(cfg.sample_interval_ms));
+	TinZrSD.writeLine(String("# time_start_local_micros: ") + String((unsigned long)startLocalUs));
+	TinZrSD.writeLine(String("# time_pc_clock_drift_correction_enabled: ") + String(cfg.enable_pc_clock_drift_correction ? "true" : "false"));
+	TinZrSD.writeLine(String("# time_scale_pc_us_per_local_us: ") + String(pcUsPerLocalUs, 9));
+	TinZrSD.writeLine(String("# time_scale_estimated_from_pc_heartbeats: ") + String(hasClockScale ? "true" : "false"));
+	TinZrSD.writeLine("# time_note: time_elapsed_estimated_from_pc_heartbeats_ms and time_elapsed_estimated_from_pc_heartbeats_datetime are heartbeat-synchronized, not sample-count-derived");
 	
 	// ---- IMU metadata (matches TinZrCore.cpp config) ----
 	TinZrSD.writeLine("# imu_accel_units: g");
@@ -480,6 +491,12 @@ void TinZrWearableSDClass::begin(const TinZrWearableSDConfig& cfg) {
 	_pcAnchorUs = 0;
 	_pcAnchorLocalUs = 0;
 	_lastHeartbeatUs = 0;
+	_pcUsPerLocalUs = 1.0;
+	_hasClockScale = false;
+	_prevPcAnchorUs = 0;
+	_prevPcAnchorLocalUs = 0;
+	_recordStartPcUs = 0;
+	_recordStartLocalUs = 0;
 
 	_recordArmed = false;
 	_recording = false;
@@ -499,6 +516,7 @@ void TinZrWearableSDClass::handle() {
 	TinZr.handle();
 	// Make sure LED animations run
 	TinZrLED.handle();
+	static uint32_t lastSdIdleLivenessCheckMs = 0;
 
 	if (!TinZr.isSoftOn()) {
 		if (_recording) {
@@ -515,6 +533,16 @@ void TinZrWearableSDClass::handle() {
 	// SD hot-plug recovery (keep FAIL_BLINK until card appears)
 	_probeSDHotplug(millis());
 
+	const uint32_t now_ms = millis();
+	if (!_recording && _sdReady && (uint32_t)(now_ms - lastSdIdleLivenessCheckMs) >= SD_IDLE_LIVENESS_CHECK_PERIOD_MS) {
+		lastSdIdleLivenessCheckMs = now_ms;
+		if (!TinZrSD.probePresence()) {
+			Serial.println("❌ SD removed/unavailable while idle");
+			_sdReady = false;
+			_updateLED();
+		}
+	}
+
 	_handleBLE();
 
 	if (_pendingHeartbeat) {
@@ -526,11 +554,34 @@ void TinZrWearableSDClass::handle() {
 
 		const uint32_t now_us = micros();
 		noInterrupts();
+		if (_hasPcAnchor) {
+			_prevPcAnchorUs = _pcAnchorUs;
+			_prevPcAnchorLocalUs = _pcAnchorLocalUs;
+		}
 		_pcAnchorUs = pendingPcAnchorUs;
 		_pcAnchorLocalUs = now_us;
 		_lastHeartbeatUs = now_us;
 		_hasPcAnchor = true;
 		interrupts();
+
+		if (_cfg.enable_pc_clock_drift_correction && _prevPcAnchorUs != 0) {
+			const uint64_t delta_pc_us = pendingPcAnchorUs - _prevPcAnchorUs;
+			const uint32_t delta_local_us = (uint32_t)(now_us - _prevPcAnchorLocalUs);
+			if (delta_pc_us > 0 && delta_local_us > 0) {
+				const double raw_scale = (double)delta_pc_us / (double)delta_local_us;
+				if (raw_scale > 0.98 && raw_scale < 1.02) {
+					if (_hasClockScale) {
+						_pcUsPerLocalUs = 0.85 * _pcUsPerLocalUs + 0.15 * raw_scale;
+					} else {
+						_pcUsPerLocalUs = raw_scale;
+						_hasClockScale = true;
+					}
+				}
+			}
+		} else if (!_cfg.enable_pc_clock_drift_correction) {
+			_pcUsPerLocalUs = 1.0;
+			_hasClockScale = false;
+		}
 	}
 
 #if TINZR_ENABLE_BLE
@@ -1103,9 +1154,11 @@ void TinZrWearableSDClass::_handleStreaming() {
 				_sdReady = false;
 				_updateLED();
 			} else {
-				// ---- IMPORTANT: start-time for log timebase (t_ms) ----
+				// ---- IMPORTANT: start-time for log timebase (time_elapsed_estimated_from_pc_heartbeats_ms) ----
 				_recording = true;
 				_sampleIdx = 0;
+				_recordStartLocalUs = now_us;
+				_recordStartPcUs = _estimate_pc_time_us_scaled(_pcAnchorUs, _pcAnchorLocalUs, now_us, _pcUsPerLocalUs);
 				TinZrSD.setRecording(true);
 
 				// write metadata header... use the PC time string/epoch for "start", not local millis
@@ -1116,11 +1169,13 @@ void TinZrWearableSDClass::_handleStreaming() {
 					_pcAnchorStr,
 					_hasPcAnchorStr,
 					_pcAnchorUs,
-					now_us
+					now_us,
+					_pcUsPerLocalUs,
+					_hasClockScale
 				);
 
 				// CSV header
-				TinZrSD.writeLine("t_ms,pc_time_iso,red,ir,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,batt_pct,hr_bpm,spo2_pct,sync_pc_time_iso");
+				TinZrSD.writeLine("time_elapsed_estimated_from_pc_heartbeats_ms,time_elapsed_estimated_from_pc_heartbeats_datetime,time_heartbeat_anchor_from_pc_datetime,time_elapsed_with_ideal_sample_interval_ms,red,ir,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,batt_pct,hr_bpm,spo2_pct");
 
 #if TINZR_ENABLE_BLE
 				if (_bleStarted && _ble.connected()) {
@@ -1141,6 +1196,8 @@ void TinZrWearableSDClass::_handleStreaming() {
 		TinZrSD.setRecording(false);
 		_recording = false;
 		_sampleIdx = 0;
+		_recordStartPcUs = 0;
+		_recordStartLocalUs = 0;
 
 #if TINZR_ENABLE_BLE
 		if (_bleStarted && _ble.connected()) {
@@ -1209,14 +1266,19 @@ void TinZrWearableSDClass::_handleStreaming() {
 		uint64_t pcAnchorUs = 0;
 		uint32_t pcAnchorLocalUs = 0;
 		uint32_t lastHeartbeatUs = 0;
+		double pcUsPerLocalUs = 1.0;
 		noInterrupts();
 		pcAnchorUs = _pcAnchorUs;
 		pcAnchorLocalUs = _pcAnchorLocalUs;
 		lastHeartbeatUs = _lastHeartbeatUs;
+		pcUsPerLocalUs = _pcUsPerLocalUs;
 		interrupts();
 
-		const uint64_t pc_time_us = _estimate_pc_time_us(pcAnchorUs, pcAnchorLocalUs, now_us);
-		const uint64_t t_ms = (uint64_t)_sampleIdx * (uint64_t)_cfg.sample_interval_ms;
+		const uint64_t pc_time_us = _estimate_pc_time_us_scaled(pcAnchorUs, pcAnchorLocalUs, now_us, pcUsPerLocalUs);
+		const uint64_t t_ms = (_recordStartPcUs != 0 && pc_time_us >= _recordStartPcUs)
+			? ((pc_time_us - _recordStartPcUs) / 1000ULL)
+			: 0ULL;
+		const uint64_t t_nominal_ms = (uint64_t)_sampleIdx * (uint64_t)_cfg.sample_interval_ms;
 		_sampleIdx++;
 
 
@@ -1242,17 +1304,18 @@ void TinZrWearableSDClass::_handleStreaming() {
 
 		snprintf(
 			line, sizeof(line),
-			"%llu,%s,%lu,%lu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%u,%u,%u,%s",
+			"%llu,%s,%s,%llu,%lu,%lu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%u,%u,%u",
 			(unsigned long long)t_ms,
 			pc_time_iso,
+			sync_pc_time_iso,
+			(unsigned long long)t_nominal_ms,
 			(unsigned long)red_raw,
 			(unsigned long)ir_raw,
 			(double)imu.ax_g, (double)imu.ay_g, (double)imu.az_g,
 			(double)imu.gx_dps, (double)imu.gy_dps, (double)imu.gz_dps,
 			(unsigned)sLastBattPct,
 			(unsigned)sLastHr,
-			(unsigned)sLastSpo2,
-			sync_pc_time_iso
+			(unsigned)sLastSpo2
 		);
 
 		TinZrSD.writeLine(String(line));

@@ -55,7 +55,18 @@ bool TinZrSDLogger::begin(const TinZrSDConfig& cfg) {
 #endif
 
 	if (_cfg.auto_mkdir) {
-		ensureDir(_cfg.log_dir);
+		if (!ensureDir(_cfg.log_dir)) {
+			Serial.print("TinZrSD: log_dir unavailable: ");
+			Serial.println(_cfg.log_dir ? _cfg.log_dir : "(null)");
+#if TINZR_SD_USE_SD_MMC
+			SD_MMC.end();
+#else
+			SD.end();
+#endif
+			_mounted = false;
+			_applyLedState(true);
+			return false;
+		}
 	}
 
 	Serial.print("TinZrSD: mounted, log_dir=");
@@ -175,6 +186,17 @@ void TinZrSDLogger::handle() {
 	}
 
 	// No need to call _applyLedState continuously unless your state changes
+}
+
+bool TinZrSDLogger::probePresence() {
+	if (!_mounted) return false;
+
+	File root = _fs->open("/");
+	if (!root) return false;
+
+	const bool ok = root.isDirectory();
+	root.close();
+	return ok;
 }
 
 

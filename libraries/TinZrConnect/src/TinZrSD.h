@@ -46,6 +46,7 @@ public:
 	
 	void handle();
 	bool mounted() const { return _mounted; }
+	bool probePresence();
 
 	// ---------- Directory utilities ----------
 	bool ensureDir(const char* path);

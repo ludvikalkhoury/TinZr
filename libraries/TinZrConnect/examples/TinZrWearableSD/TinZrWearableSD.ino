@@ -99,9 +99,10 @@
 #include "TinZrWearableSD.h"
 
 TinZrWearableSDConfig cfg = {
-	.hostname           = "TinZrBlue",
-	.sample_interval_ms = 4,      // ≈ 250 Hz
-	.sd_log_dir         = "/TinZrLogs"
+	.hostname                         = "TinZrA", 
+	.sample_interval_ms               = 4,      // ≈ 250 Hz
+	.enable_pc_clock_drift_correction = true,
+	.sd_log_dir                       = "/TinZrLogs"
 };
 
 void setup() {
