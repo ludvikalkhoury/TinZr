@@ -7,7 +7,7 @@ It provides a clean, Boards-Manager-installable package so anyone can use your b
 The manuscript describing this work is currently under peer review.
 The materials in this repository correspond to the submitted version of the work.
 Please refrain from redistributing or reproducing this work until the peer-review process is complete.
-In the meantime, the preprint is available on SSRN: https://ssrn.com/abstract=6380099, and is also included in this repository (TinZr_PrePrint_2026-03-30.pdf). 
+In the meantime, the preprint is available on SSRN: https://ssrn.com/abstract=6380099, and is also included in this repository (`TinZr_PrePrint_2026-03-30.pdf`). 
 
 If you use this work, please cite:
 > **Alkhoury, Ludvik** and Moore, Tony and Swissler, Petras and Hill, Jeremy and Shah, Sudhin A. and Kam, Moshe, TinZr: A Compact Wireless ESP32-C3 Platform for Multi-modal Physiological Data Acquisition (January 01, 2026). Available at SSRN: http://dx.doi.org/10.2139/ssrn.6380099 
