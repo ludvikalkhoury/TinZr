@@ -520,10 +520,12 @@ void TinZrWearableSDClass::handle() {
 
 	if (!TinZr.isSoftOn()) {
 		if (_recording) {
+			_drainSdLogBuffer(true);
 			TinZrSD.flush();
 			TinZrSD.closeLog();
 			TinZrSD.setRecording(false);
 			_recording = false;
+			_resetSdLogBuffer();
 		}
 		TinZrLED.setMode(TinZrStatusLED::Mode::OFF);
 		return;
@@ -595,9 +597,10 @@ void TinZrWearableSDClass::handle() {
 
 
 
+	_handleStreaming();
+	_drainSdLogBuffer();
 	_handleDeferredBleActions();
 	_pumpSdTransfer();
-	_handleStreaming();
 }
 
 
@@ -1062,12 +1065,14 @@ void TinZrWearableSDClass::_handleBleCommand(const uint8_t* data, size_t len) {
 		_recordArmed = false;
 
 		if (_recording) {
+			_drainSdLogBuffer(true);
 			TinZrSD.flush();
 			TinZrSD.writeLine("====================RecordingEndsHere====================");
 			TinZrSD.flush();
 			TinZrSD.closeLog();
 			TinZrSD.setRecording(false);
 			_recording = false;
+			_resetSdLogBuffer();
 		}
 
 #if TINZR_ENABLE_BLE
@@ -1094,6 +1099,7 @@ void TinZrWearableSDClass::_applyStreamingChange(bool enable) {
 		_streaming          = true;
 		sFrameCount         = 0;
 		_lastSampleUs       = 0;
+		_resetSdLogBuffer();
 		sLastHr             = 0;
 		sLastSpo2           = 0;
 		sLastHrSpo2UpdateMs = 0;
@@ -1108,14 +1114,82 @@ void TinZrWearableSDClass::_applyStreamingChange(bool enable) {
 }
 
 // ================== STREAMING ===================
+void TinZrWearableSDClass::_resetSdLogBuffer() {
+	_sdLogHead = 0;
+	_sdLogTail = 0;
+	_sdLogCount = 0;
+	_sdLogDroppedLines = 0;
+	_lastSdFlushMs = 0;
+}
+
+bool TinZrWearableSDClass::_queueSdLogLine(const char* line) {
+	if (!line) return false;
+	if (_sdLogCount >= SD_LOG_QUEUE_DEPTH) {
+		_sdLogDroppedLines++;
+		return false;
+	}
+
+	snprintf(_sdLogQueue[_sdLogHead], SD_LOG_LINE_MAX, "%s", line);
+	_sdLogHead = (_sdLogHead + 1) % SD_LOG_QUEUE_DEPTH;
+	_sdLogCount++;
+	return true;
+}
+
+void TinZrWearableSDClass::_drainSdLogBuffer(bool forceFlush) {
+	if (!_recording || !TinZrSD.logOpen()) {
+		_resetSdLogBuffer();
+		return;
+	}
+
+	while (_sdLogCount > 0) {
+		if (!TinZrSD.writeLine(String(_sdLogQueue[_sdLogTail]))) {
+			break;
+		}
+		_sdLogTail = (_sdLogTail + 1) % SD_LOG_QUEUE_DEPTH;
+		_sdLogCount--;
+	}
+
+	if (_sdLogDroppedLines != 0) {
+		Serial.print("WARNING: SD log queue overflow, dropped lines: ");
+		Serial.println(_sdLogDroppedLines);
+		_sdLogDroppedLines = 0;
+	}
+
+	const unsigned long now_ms = millis();
+	if (forceFlush || _lastSdFlushMs == 0 || (uint32_t)(now_ms - _lastSdFlushMs) >= 1000UL) {
+		TinZrSD.flush();
+		_lastSdFlushMs = now_ms;
+	}
+}
+
 void TinZrWearableSDClass::_handleStreaming() {
 	const uint32_t now_us = micros();
 	const unsigned long now_ms = millis();
 	const uint32_t sample_interval_us = (uint32_t)_cfg.sample_interval_ms * 1000UL;
+	static constexpr uint32_t MAX_SAMPLE_LAG_INTERVALS = 4;
 
 	if (sample_interval_us == 0) return;
-	if (_lastSampleUs != 0 && (uint32_t)(now_us - _lastSampleUs) < sample_interval_us) return;
-	_lastSampleUs = now_us;
+	if (_lastSampleUs == 0) {
+		_lastSampleUs = now_us;
+		return;
+	}
+
+	const uint32_t elapsed_us = (uint32_t)(now_us - _lastSampleUs);
+	if (elapsed_us < sample_interval_us) return;
+
+	const uint32_t elapsed_intervals = elapsed_us / sample_interval_us;
+	if (elapsed_intervals > 1) {
+		const uint32_t skipped_intervals = elapsed_intervals - 1;
+		_sampleIdx += skipped_intervals;
+
+		if (elapsed_intervals > MAX_SAMPLE_LAG_INTERVALS) {
+			_lastSampleUs = now_us - sample_interval_us;
+		} else {
+			_lastSampleUs += skipped_intervals * sample_interval_us;
+		}
+	}
+
+	_lastSampleUs += sample_interval_us;
 
 	if (!_imuReady) return;
 
@@ -1159,6 +1233,7 @@ void TinZrWearableSDClass::_handleStreaming() {
 				_sampleIdx = 0;
 				_recordStartLocalUs = now_us;
 				_recordStartPcUs = _estimate_pc_time_us_scaled(_pcAnchorUs, _pcAnchorLocalUs, now_us, _pcUsPerLocalUs);
+				_resetSdLogBuffer();
 				TinZrSD.setRecording(true);
 
 				// write metadata header... use the PC time string/epoch for "start", not local millis
@@ -1190,6 +1265,7 @@ void TinZrWearableSDClass::_handleStreaming() {
 
 	// Stop recording if heartbeat missing
 	if (!heartbeat_ok && _recording) {
+		_drainSdLogBuffer(true);
 		Serial.println("⏹ SD stop (heartbeat missing or disarmed)");
 		TinZrSD.flush();
 		TinZrSD.closeLog();
@@ -1198,6 +1274,7 @@ void TinZrWearableSDClass::_handleStreaming() {
 		_sampleIdx = 0;
 		_recordStartPcUs = 0;
 		_recordStartLocalUs = 0;
+		_resetSdLogBuffer();
 
 #if TINZR_ENABLE_BLE
 		if (_bleStarted && _ble.connected()) {
@@ -1255,6 +1332,7 @@ void TinZrWearableSDClass::_handleStreaming() {
 			_recording = false;
 			_sampleIdx = 0; 
 
+			_resetSdLogBuffer();
 			_sdReady = false; // force FAIL_BLINK until _probeSDHotplug() succeeds
 			_updateLED();
 			return;
@@ -1284,7 +1362,7 @@ void TinZrWearableSDClass::_handleStreaming() {
 
 		char pc_time_iso[32];
 		char sync_pc_time_iso[32];
-		char line[320];
+		char line[SD_LOG_LINE_MAX];
 
 		// Log the exact heartbeat anchor on the sample nearest to its arrival, else 0.
 		uint64_t sync_pc_time_us = 0;
@@ -1318,13 +1396,7 @@ void TinZrWearableSDClass::_handleStreaming() {
 			(unsigned)sLastSpo2
 		);
 
-		TinZrSD.writeLine(String(line));
-
-		static unsigned long lastFlush = 0;
-		if (lastFlush == 0 || (now_ms - lastFlush) >= 1000UL) {
-			TinZrSD.flush();
-			lastFlush = now_ms;
-		}
+		_queueSdLogLine(line);
 	}
 }
 

@@ -53,6 +53,14 @@ private:
 	bool     _streaming    = false;
 	uint32_t _lastSampleUs = 0;
 	bool     _wasSoftOn    = false;
+	static constexpr size_t SD_LOG_LINE_MAX = 320;
+	static constexpr size_t SD_LOG_QUEUE_DEPTH = 32;
+	char     _sdLogQueue[SD_LOG_QUEUE_DEPTH][SD_LOG_LINE_MAX]{};
+	size_t   _sdLogHead = 0;
+	size_t   _sdLogTail = 0;
+	size_t   _sdLogCount = 0;
+	uint32_t _sdLogDroppedLines = 0;
+	unsigned long _lastSdFlushMs = 0;
 
 	// ===== SD logging controlled by PC heartbeat =====
 	bool     _sdReady             = false;
@@ -103,6 +111,9 @@ private:
 	void _handleBLE();
 	void _handleDeferredBleActions();
 	void _handleStreaming();
+	void _drainSdLogBuffer(bool forceFlush = false);
+	bool _queueSdLogLine(const char* line);
+	void _resetSdLogBuffer();
 	void _applyStreamingChange(bool enable);
 
 	// NEW: SD hot-plug probe helper
