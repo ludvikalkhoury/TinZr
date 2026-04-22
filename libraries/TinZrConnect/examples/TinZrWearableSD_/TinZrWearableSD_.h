@@ -5,6 +5,8 @@
 #include <MAX30105.h>
 #include <SD.h>
 
+#include "TinZrBLE.h"
+
 #ifndef PB_PIN
 #define PB_PIN 9
 #endif
@@ -20,6 +22,7 @@
 struct TinZrWearableSDConfig {
 	uint16_t    sample_interval_ms = 4;        // 250 Hz
 	const char* sd_log_dir         = "/TinZrLogs";
+	const char* hostname           = "TinZr";
 };
 
 class TinZrWearableSD_Class {
@@ -48,16 +51,30 @@ private:
 	static constexpr float GYR_SCALE_DPS_PER_LSB = 0.035f;
 	static constexpr float PPG_ADC_FULL_SCALE_NA = 16384.0f;
 	static constexpr float PPG_ADC_MAX_COUNT     = 262143.0f;
+	static constexpr int PIN_BAT = A1;
+	static constexpr float BAT_VREF = 3.3f;
+	static constexpr float BAT_ADC_MAX = 4095.0f;
+	static constexpr float BAT_DIVIDER_RATIO = 150000.0f / (220000.0f + 150000.0f);
+	static constexpr float BAT_VBAT_MIN = 3.3f;
+	static constexpr float BAT_VBAT_MAX = 4.2f;
 
 	TinZrWearableSDConfig cfg;
 
 	Adafruit_NeoPixel pixel;
 	MAX30105 ppg;
+	TinZrBLEConnect ble;
 
 	File logFile;
 
 	bool recording = false;
 	bool ppgAvailable = false;
+	bool bleStarted = false;
+	bool bleStartArmed = false;
+	bool lastBleConnected = false;
+	volatile bool pendingBleStart = false;
+	char pcStartTimestamp[40] = "";
+	char deviceName[32] = "";
+	char subjectName[32] = "";
 
 	bool lastButton = false;
 	bool stableButton = false;
@@ -66,10 +83,22 @@ private:
 	uint32_t recordStartMs = 0;     // real millis() at recording start
 	uint32_t scheduledMs   = 0;     // ideal sample schedule in millis()
 	uint32_t lastFlushMs   = 0;
+	uint32_t bleBlinkMs = 0;
+	bool bleBlinkOn = false;
 
 	void setLED(uint8_t r, uint8_t g, uint8_t b);
 	void setStoppedLED();
 	void setRecordingLED();
+
+	static TinZrWearableSD_Class* self;
+	static void bleWriteStatic(const uint8_t* data, size_t len);
+	void handleBleCommand(const uint8_t* data, size_t len);
+	void initBLEStartListener();
+	void handleBLEStartListener();
+	void stopBLEStartListener();
+	float readBatteryVoltage() const;
+	int readBatteryPercent() const;
+	void sendBatteryLevel();
 
 	bool readButtonPressed();
 	bool buttonPressedEvent();

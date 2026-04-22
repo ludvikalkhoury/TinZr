@@ -1,9 +1,11 @@
 #include "TinZrWearableSD_.h"
 
 #include <SPI.h>
+#include <string.h>
 #include <Wire.h>
 
 TinZrWearableSD_Class TinZrWearableSD_;
+TinZrWearableSD_Class* TinZrWearableSD_Class::self = nullptr;
 
 TinZrWearableSD_Class::TinZrWearableSD_Class()
 	: pixel(1, PIN_RGB_LED, NEO_GRB + NEO_KHZ800) {}
@@ -22,6 +24,150 @@ void TinZrWearableSD_Class::setStoppedLED() {
 
 void TinZrWearableSD_Class::setRecordingLED() {
 	setLED(0, 255, 0);
+}
+
+// =========================
+// BLE start listener
+// =========================
+void TinZrWearableSD_Class::bleWriteStatic(const uint8_t* data, size_t len) {
+	if (!self || !data || len == 0) return;
+	self->handleBleCommand(data, len);
+}
+
+void TinZrWearableSD_Class::handleBleCommand(const uint8_t* data, size_t len) {
+	if (recording) return;
+
+	String cmd;
+	cmd.reserve(len + 1);
+	for (size_t i = 0; i < len; i++) {
+		cmd += char(data[i]);
+	}
+	cmd.trim();
+
+	if (cmd.equalsIgnoreCase("S") || cmd.equalsIgnoreCase("START")) {
+		if (bleStartArmed && subjectName[0] != '\0' && pcStartTimestamp[0] != '\0') {
+			pendingBleStart = true;
+			bleStartArmed = false;
+		} else {
+			Serial.println("BLE start ignored: missing GUI metadata");
+		}
+	} else if (cmd.equalsIgnoreCase("BAT")) {
+		sendBatteryLevel();
+	} else if (cmd.startsWith("T:")) {
+		String stamp = cmd.substring(2);
+		stamp.trim();
+		stamp.toCharArray(pcStartTimestamp, sizeof(pcStartTimestamp));
+		if (subjectName[0] != '\0') bleStartArmed = true;
+	} else if (cmd.startsWith("D:")) {
+		String name = cmd.substring(2);
+		name.trim();
+		name.toCharArray(deviceName, sizeof(deviceName));
+	} else if (cmd.startsWith("P:")) {
+		String subject = cmd.substring(2);
+		subject.trim();
+		subject.toCharArray(subjectName, sizeof(subjectName));
+		if (pcStartTimestamp[0] != '\0') bleStartArmed = true;
+	}
+}
+
+void TinZrWearableSD_Class::initBLEStartListener() {
+#if TINZR_ENABLE_BLE
+	if (bleStarted) return;
+
+	TinZrBLEConfig bleCfg;
+	bleCfg.device_name = (cfg.hostname && cfg.hostname[0] != '\0') ? cfg.hostname : "TinZr";
+	bleCfg.preferred_mtu = 247;
+
+	self = this;
+	bleStarted = ble.begin(bleCfg);
+	if (bleStarted) {
+		ble.onWrite(&TinZrWearableSD_Class::bleWriteStatic);
+		Serial.println("BLE start listener ready");
+	} else {
+		Serial.println("BLE start listener off");
+	}
+#endif
+}
+
+void TinZrWearableSD_Class::handleBLEStartListener() {
+#if TINZR_ENABLE_BLE
+	if (bleStarted && !recording) {
+		ble.handle();
+
+		bool nowConnected = ble.connected();
+		if (nowConnected) {
+			uint32_t now = millis();
+			if (!lastBleConnected) {
+				bleBlinkMs = now;
+				bleBlinkOn = false;
+			}
+			if ((uint32_t)(now - bleBlinkMs) >= 250) {
+				bleBlinkMs = now;
+				bleBlinkOn = !bleBlinkOn;
+				if (bleBlinkOn) setLED(0, 255, 0);
+				else setStoppedLED();
+			}
+		} else if (lastBleConnected) {
+			bleBlinkOn = false;
+			bleBlinkMs = 0;
+			setStoppedLED();
+		}
+		lastBleConnected = nowConnected;
+	}
+#endif
+}
+
+void TinZrWearableSD_Class::stopBLEStartListener() {
+#if TINZR_ENABLE_BLE
+	if (bleStarted) {
+		ble.end();
+		bleStarted = false;
+		lastBleConnected = false;
+		bleBlinkMs = 0;
+		bleBlinkOn = false;
+		self = nullptr;
+		Serial.println("BLE start listener stopped");
+	}
+#endif
+}
+
+float TinZrWearableSD_Class::readBatteryVoltage() const {
+	const int N = 16;
+	uint32_t acc = 0;
+
+	for (int i = 0; i < N; i++) {
+		acc += analogRead(PIN_BAT);
+		delay(2);
+	}
+
+	float raw = acc / float(N);
+	float vDiv = raw * (BAT_VREF / BAT_ADC_MAX);
+	return vDiv / BAT_DIVIDER_RATIO;
+}
+
+int TinZrWearableSD_Class::readBatteryPercent() const {
+	float vbat = readBatteryVoltage();
+	if (vbat <= BAT_VBAT_MIN) return 0;
+	if (vbat >= BAT_VBAT_MAX) return 100;
+
+	float frac = (vbat - BAT_VBAT_MIN) / (BAT_VBAT_MAX - BAT_VBAT_MIN);
+	int pct = int(frac * 100.0f + 0.5f);
+
+	if (pct < 0) pct = 0;
+	if (pct > 100) pct = 100;
+	return pct;
+}
+
+void TinZrWearableSD_Class::sendBatteryLevel() {
+#if TINZR_ENABLE_BLE
+	if (!bleStarted || !ble.connected()) return;
+
+	int pct = readBatteryPercent();
+	char msg[16];
+	snprintf(msg, sizeof(msg), "BAT:%d", pct);
+	ble.sendNotify((const uint8_t*)msg, strlen(msg));
+	delay(30);
+#endif
 }
 
 // =========================
@@ -63,11 +209,50 @@ const char* TinZrWearableSD_Class::logDir() const {
 }
 
 String TinZrWearableSD_Class::makeFilename() {
-	for (int i = 1; i < 10000; i++) {
-		String path = String(logDir()) + "/" + String(i) + ".csv";
-		if (!SD.exists(path.c_str())) return path;
+	String stem = "";
+	if (subjectName[0] != '\0') {
+		String subject = String(subjectName);
+		if (subject.startsWith("sub-")) {
+			stem += subject;
+		} else {
+			stem += "sub-";
+			stem += subject;
+		}
+	} else {
+		stem += "sub-unknown";
 	}
-	return String(logDir()) + "/9999.csv";
+
+	if (deviceName[0] != '\0') {
+		stem += "_device-";
+		stem += String(deviceName);
+	}
+
+	if (pcStartTimestamp[0] != '\0') {
+		stem += "_";
+		stem += String(pcStartTimestamp);
+	}
+
+	for (size_t j = 0; j < stem.length(); j++) {
+		char c = stem[j];
+		bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
+		if (!ok) stem.setCharAt(j, '_');
+	}
+
+	String path = String(logDir()) + "/" + stem + ".csv";
+	if (!SD.exists(path.c_str())) return path;
+
+	for (int i = 2; i < 10000; i++) {
+		String suffix = "_" + String(i);
+		String candidate = String(logDir()) + "/" + stem + suffix;
+		for (size_t j = 0; j < candidate.length(); j++) {
+			char c = candidate[j];
+			bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
+			if (!ok && c != '/') candidate.setCharAt(j, '_');
+		}
+		candidate += ".csv";
+		if (!SD.exists(candidate.c_str())) return candidate;
+	}
+	return String(logDir()) + "/" + stem + "_9999.csv";
 }
 
 // =========================
@@ -159,8 +344,12 @@ bool TinZrWearableSD_Class::initPPG() {
 // Logging
 // =========================
 void TinZrWearableSD_Class::startRecording() {
+	stopBLEStartListener();
+
 	if (!ensureDir(logDir())) {
 		Serial.println("DIR FAIL");
+		setStoppedLED();
+		initBLEStartListener();
 		return;
 	}
 
@@ -169,6 +358,8 @@ void TinZrWearableSD_Class::startRecording() {
 
 	if (!logFile) {
 		Serial.println("FILE OPEN FAIL");
+		setStoppedLED();
+		initBLEStartListener();
 		return;
 	}
 
@@ -193,7 +384,12 @@ void TinZrWearableSD_Class::stopRecording() {
 	logFile.close();
 
 	recording = false;
+	bleStartArmed = false;
+	pendingBleStart = false;
+	pcStartTimestamp[0] = '\0';
+	subjectName[0] = '\0';
 	setStoppedLED();
+	initBLEStartListener();
 
 	Serial.println("STOPPED");
 }
@@ -206,6 +402,12 @@ void TinZrWearableSD_Class::writeLogHeader(const String& filename) {
 	logFile.println(filename);
 	logFile.print("# sd_log_dir: ");
 	logFile.println(logDir());
+	logFile.print("# device_name: ");
+	logFile.println(deviceName[0] != '\0' ? deviceName : "unavailable");
+	logFile.print("# subject_id: ");
+	logFile.println(subjectName[0] != '\0' ? subjectName : "unknown");
+	logFile.print("# pc_start_timestamp: ");
+	logFile.println(pcStartTimestamp[0] != '\0' ? pcStartTimestamp : "unavailable");
 	logFile.print("# sample_interval_ms: ");
 	logFile.println(cfg.sample_interval_ms);
 	logFile.print("# target_sample_rate_hz: ");
@@ -231,6 +433,7 @@ void TinZrWearableSD_Class::writeLogHeader(const String& filename) {
 	logFile.println("# imu_gyro_scale_dps_per_lsb: 0.035");
 	logFile.println("# ppg_note: red_nA and ir_nA are logged as zero if PPG is unavailable");
 	logFile.println("# time_note: t_ms is scheduled elapsed time from recording start");
+	logFile.println("# pc_start_timestamp_note: PC timestamp sent by the GUI at the start command, right before SD logging starts");
 	logFile.println("# -----------------------------------------------");
 	logFile.println("t_ms,red_nA,ir_nA,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps");
 }
@@ -297,11 +500,17 @@ void TinZrWearableSD_Class::begin() {
 
 void TinZrWearableSD_Class::begin(const TinZrWearableSDConfig& config) {
 	cfg = config;
+	if (cfg.hostname && cfg.hostname[0] != '\0') {
+		String name = String(cfg.hostname);
+		name.trim();
+		name.toCharArray(deviceName, sizeof(deviceName));
+	}
 
 	Serial.begin(115200);
 	delay(300);
 
 	pinMode(PB_PIN, INPUT_PULLUP);
+	pinMode(PIN_BAT, INPUT);
 
 	pixel.begin();
 	pixel.setBrightness(25);
@@ -315,9 +524,12 @@ void TinZrWearableSD_Class::begin(const TinZrWearableSDConfig& config) {
 	Serial.println("Init IMU...");
 	if (!initIMU()) {
 		Serial.println("IMU FAIL");
+		initBLEStartListener();
 		while (1) {
+			handleBLEStartListener();
 			setStoppedLED();
 			delay(150);
+			handleBLEStartListener();
 			setLED(0, 0, 0);
 			delay(150);
 		}
@@ -329,9 +541,12 @@ void TinZrWearableSD_Class::begin(const TinZrWearableSDConfig& config) {
 
 	if (!SD.begin(SD_CS_PIN)) {
 		Serial.println("SD FAIL");
+		initBLEStartListener();
 		while (1) {
+			handleBLEStartListener();
 			setStoppedLED();
 			delay(80);
+			handleBLEStartListener();
 			setLED(0, 0, 0);
 			delay(80);
 		}
@@ -339,14 +554,18 @@ void TinZrWearableSD_Class::begin(const TinZrWearableSDConfig& config) {
 
 	if (!ensureDir(logDir())) {
 		Serial.println("DIR FAIL");
+		initBLEStartListener();
 		while (1) {
+			handleBLEStartListener();
 			setStoppedLED();
 			delay(250);
+			handleBLEStartListener();
 			setLED(0, 0, 0);
 			delay(250);
 		}
 	}
 
+	initBLEStartListener();
 	Serial.println("READY");
 }
 
@@ -354,8 +573,23 @@ void TinZrWearableSD_Class::begin(const TinZrWearableSDConfig& config) {
 // LOOP
 // =========================
 void TinZrWearableSD_Class::handle() {
+	handleBLEStartListener();
+
+	if (pendingBleStart && !recording) {
+		pendingBleStart = false;
+		bleStartArmed = false;
+		sendBatteryLevel();
+		startRecording();
+	}
+
 	if (buttonPressedEvent()) {
-		if (!recording) startRecording();
+		if (!recording) {
+			bleStartArmed = false;
+			pendingBleStart = false;
+			pcStartTimestamp[0] = '\0';
+			subjectName[0] = '\0';
+			startRecording();
+		}
 		else stopRecording();
 	}
 
