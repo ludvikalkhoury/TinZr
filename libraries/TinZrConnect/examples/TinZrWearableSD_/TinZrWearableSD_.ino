@@ -57,7 +57,7 @@
 TinZrWearableSDConfig cfg = {
 	.sample_interval_ms = 4,      // 250 Hz
 	.sd_log_dir         = "/TinZrLogs",
-	.hostname           = "TinZrBlacl"
+	.hostname           = "TinZrBlack"
 };
 
 void setup() {
