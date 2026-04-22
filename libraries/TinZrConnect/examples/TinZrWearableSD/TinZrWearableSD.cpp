@@ -15,21 +15,23 @@ TinZrWearableSDClass TinZrWearableSD;
 
 // ===== Packed binary frames for BLE =====
 static const uint8_t FRAMES_PER_PACKET = 9;
+static constexpr float PPG_ADC_FULL_SCALE_NA = 16384.0f;
+static constexpr float PPG_ADC_MAX_COUNT = 262143.0f;
 
 // Scaling factors (match Python viewer)
-static constexpr float ACC_SCALE = 1000.0f;  // accel: m/s^2 → milli-units (viewer expects *1000)
-static constexpr float GYR_SCALE = 100.0f;   // gyro:  dps → centi-units  (viewer expects *100)
-static constexpr float G_SENS_DPS_PER_LSB = 35e-3f; // 35 mdps/LSB for ±1000 dps
+static constexpr float ACC_SCALE = 1000.0f;  // accel: m/s^2 -> milli-units (viewer expects *1000)
+static constexpr float GYR_SCALE = 100.0f;   // gyro: dps -> centi-units (viewer expects *100)
+static constexpr float G_SENS_DPS_PER_LSB = 35e-3f; // 35 mdps/LSB for +/-1000 dps
 
 // --- HR / SpO2 + battery in frame ---
 struct __attribute__((packed)) WearFrame {
 	int16_t  ax, ay, az;   // accel * ACC_SCALE
 	int16_t  gx, gy, gz;   // gyro  * GYR_SCALE
-	uint32_t red;          // raw PPG red
-	uint32_t ir;           // raw PPG ir
+	float    red_nA;       // approximate PPG red photodiode current
+	float    ir_nA;        // approximate PPG IR photodiode current
 	uint8_t  hr_bpm;       // last computed heart rate
 	uint8_t  spo2_pct;     // last computed SpO2
-	uint8_t  batt_pct;     // last battery % (0–100)
+	uint8_t  batt_pct;     // last battery % (0-100)
 };
 
 static WearFrame sFrameBuf[FRAMES_PER_PACKET];
@@ -98,12 +100,12 @@ static void update_hr_spo2_from_ppg(uint32_t red, uint32_t ir) {
 	static int idx25         = 0;
 	static int decim_counter = 0;
 
-	// ---- 1) Decimate 250 Hz → 25 Hz ----
+	// ---- 1) Decimate 250 Hz -> 25 Hz ----
 	decim_counter++;
 	if (decim_counter < 10) return;
 	decim_counter = 0;
 
-	// ---- 2) If no finger → reset algorithm state ----
+	// ---- 2) If no finger -> reset algorithm state ----
 	if (ir < IR_THRESHOLD) {
 		idx25     = 0;
 		sLastHr   = 0;
@@ -342,7 +344,9 @@ static void _write_log_metadata_header(
 	if (hasPcAnchorStr && pcAnchorStr.length()) {
 		TinZrSD.writeLine(String("# start_time_from_pc_datetime: ") + pcAnchorStr);
 	} else {
-		TinZrSD.writeLine(String("# start_time_from_pc_us: ") + String((unsigned long long)pcAnchorUs));
+		TinZrSD.writeLine(pcAnchorUs != 0
+			? String("# start_time_from_pc_us: ") + String((unsigned long long)pcAnchorUs)
+			: String("# start_time_from_pc_us: unavailable"));
 	}
 
 	TinZrSD.writeLine(String("# time_sample_interval_ms: ") + String(cfg.sample_interval_ms));
@@ -350,13 +354,20 @@ static void _write_log_metadata_header(
 	TinZrSD.writeLine(String("# time_pc_clock_drift_correction_enabled: ") + String(cfg.enable_pc_clock_drift_correction ? "true" : "false"));
 	TinZrSD.writeLine(String("# time_scale_pc_us_per_local_us: ") + String(pcUsPerLocalUs, 9));
 	TinZrSD.writeLine(String("# time_scale_estimated_from_pc_heartbeats: ") + String(hasClockScale ? "true" : "false"));
-	TinZrSD.writeLine("# time_note: time_elapsed_estimated_from_pc_heartbeats_ms and time_elapsed_estimated_from_pc_heartbeats_datetime are heartbeat-synchronized, not sample-count-derived");
+	TinZrSD.writeLine("# heartbeat_freshness_timeout_us: 2500000");
+	TinZrSD.writeLine("# sd_log_queue_depth: 128");
+	TinZrSD.writeLine("# time_note: local_elapsed_us is the canonical device timeline; heartbeat-derived columns are optional calibration metadata");
 	
 	// ---- IMU metadata (matches TinZrCore.cpp config) ----
 	TinZrSD.writeLine("# imu_accel_units: g");
 	TinZrSD.writeLine("# imu_gyro_units: dps");
 	TinZrSD.writeLine("# imu_accel_fullscale: +/-8g");
 	TinZrSD.writeLine("# imu_gyro_fullscale: +/-1000dps");
+	TinZrSD.writeLine("# ppg_units: approximate MAX30102 photodiode current in nanoamps");
+	TinZrSD.writeLine("# ppg_adc_full_scale_nA: 16384");
+	TinZrSD.writeLine("# ppg_adc_resolution_bits: 18");
+	TinZrSD.writeLine("# ppg_adc_max_count: 262143");
+	TinZrSD.writeLine("# ppg_current_conversion: current_nA = adc_count * 16384 / 262143");
 	
 	TinZrSD.writeLine("# -----------------------------------------------");
 	TinZrSD.writeLine("#"); // blank/comment line separator
@@ -382,7 +393,7 @@ void TinZrWearableSDClass::_probeSDHotplug(unsigned long now) {
 		_sdReady = true;
 		TinZrSD.setRecording(false);
 
-		Serial.println("✅ SD detected (hot-plug) → logging enabled");
+		Serial.println("SD detected (hot-plug) -> logging enabled");
 		_updateLED();
 	} else {
 		_sdReady = false; // stay failing
@@ -422,10 +433,10 @@ void TinZrWearableSDClass::begin(const TinZrWearableSDConfig& cfg) {
 
 		_bleStarted = _ble.begin(bcfg);
 		if (!_bleStarted) {
-			Serial.println("❌ TinZrWearable: BLE start failed");
+			Serial.println("TinZrWearable: BLE start failed");
 			TinZrLED.setMode(TinZrStatusLED::Mode::WIFI_FAIL);
 		} else {
-			Serial.println("🟦 BLE started (advertising)");
+			Serial.println("BLE started (advertising)");
 
 			_self = this;
 			_ble.onWrite(&TinZrWearableSDClass::_bleWriteStatic);
@@ -435,22 +446,22 @@ void TinZrWearableSDClass::begin(const TinZrWearableSDConfig& cfg) {
 		}
 	}
 #else
-	Serial.println("🚫 BLE disabled at compile time");
+	Serial.println("BLE disabled at compile time");
 #endif
 
 	// ---------- Sensors ----------
-	Serial.println("🔧 Initializing sensors via TinZrCore...");
+	Serial.println("Initializing sensors via TinZrCore...");
 	bool ok = TinZr.sensorsBegin();
 	_imuReady = TinZr.imuReady();
 	_ppgReady = TinZr.ppgReady();
 	_sensorsReady = _imuReady;
 
 	if (!ok || !_imuReady) {
-		Serial.println("❌ IMU NOT found → cannot stream");
+		Serial.println("IMU NOT found -> cannot stream");
 	} else if (_ppgReady) {
-		Serial.println("✅ Sensors ready (IMU + PPG)");
+		Serial.println("Sensors ready (IMU + PPG)");
 	} else {
-		Serial.println("⚠️ PPG NOT found → will stream IMU, send PPG zeros");
+		Serial.println("PPG NOT found -> will stream IMU, send PPG zeros");
 	}
 
 	// ---------- SD ----------
@@ -462,10 +473,10 @@ void TinZrWearableSDClass::begin(const TinZrWearableSDConfig& cfg) {
 
 		_sdReady = TinZrSD.begin(scfg);
 		if (_sdReady) {
-			Serial.println("✅ SD ready");
+			Serial.println("SD ready");
 			TinZrSD.setRecording(false);
 		} else {
-			Serial.println("⚠️ SD not ready (logging disabled until inserted)");
+			Serial.println("SD not ready (logging disabled until inserted)");
 		}
 	}
 
@@ -497,9 +508,15 @@ void TinZrWearableSDClass::begin(const TinZrWearableSDConfig& cfg) {
 	_prevPcAnchorLocalUs = 0;
 	_recordStartPcUs = 0;
 	_recordStartLocalUs = 0;
+	_goodHeartbeatPairs = 0;
 
 	_recordArmed = false;
 	_recording = false;
+	_sdLogDroppedLinesTotal = 0;
+	_sdLogDroppedLinesReported = 0;
+	_sdFlushPending = false;
+	_sdBackpressureFlag = false;
+	_lastLagIntervalsThisSample = 0;
 
 	_participant = "";
 
@@ -508,8 +525,8 @@ void TinZrWearableSDClass::begin(const TinZrWearableSDConfig& cfg) {
 	_updateLED();
 
 	Serial.println("Controls:");
-	Serial.println("  • Streaming auto-starts on BLE connect.");
-	Serial.println("  • Python HUB gates viewing with Start/Stop Data.");
+	Serial.println("  - Streaming auto-starts on BLE connect.");
+	Serial.println("  - SD logging can continue autonomously after BLE disconnect.");
 }
 
 void TinZrWearableSDClass::handle() {
@@ -520,12 +537,7 @@ void TinZrWearableSDClass::handle() {
 
 	if (!TinZr.isSoftOn()) {
 		if (_recording) {
-			_drainSdLogBuffer(true);
-			TinZrSD.flush();
-			TinZrSD.closeLog();
-			TinZrSD.setRecording(false);
-			_recording = false;
-			_resetSdLogBuffer();
+			_stopRecording("soft off");
 		}
 		TinZrLED.setMode(TinZrStatusLED::Mode::OFF);
 		return;
@@ -539,7 +551,7 @@ void TinZrWearableSDClass::handle() {
 	if (!_recording && _sdReady && (uint32_t)(now_ms - lastSdIdleLivenessCheckMs) >= SD_IDLE_LIVENESS_CHECK_PERIOD_MS) {
 		lastSdIdleLivenessCheckMs = now_ms;
 		if (!TinZrSD.probePresence()) {
-			Serial.println("❌ SD removed/unavailable while idle");
+			Serial.println("SD removed/unavailable while idle");
 			_sdReady = false;
 			_updateLED();
 		}
@@ -569,33 +581,42 @@ void TinZrWearableSDClass::handle() {
 		if (_cfg.enable_pc_clock_drift_correction && _prevPcAnchorUs != 0) {
 			const uint64_t delta_pc_us = pendingPcAnchorUs - _prevPcAnchorUs;
 			const uint32_t delta_local_us = (uint32_t)(now_us - _prevPcAnchorLocalUs);
-			if (delta_pc_us > 0 && delta_local_us > 0) {
+			if (delta_pc_us >= HEARTBEAT_MIN_INTERVAL_US &&
+				delta_pc_us <= HEARTBEAT_MAX_INTERVAL_US &&
+				delta_local_us >= HEARTBEAT_MIN_INTERVAL_US &&
+				delta_local_us <= HEARTBEAT_MAX_INTERVAL_US) {
 				const double raw_scale = (double)delta_pc_us / (double)delta_local_us;
-				if (raw_scale > 0.98 && raw_scale < 1.02) {
-					if (_hasClockScale) {
-						_pcUsPerLocalUs = 0.85 * _pcUsPerLocalUs + 0.15 * raw_scale;
+				if (raw_scale > HEARTBEAT_SCALE_MIN && raw_scale < HEARTBEAT_SCALE_MAX) {
+					if (_goodHeartbeatPairs < 255) {
+						_goodHeartbeatPairs++;
+					}
+
+					if (_goodHeartbeatPairs >= HEARTBEAT_SCALE_LOCK_MIN_PAIRS) {
+						if (_hasClockScale) {
+							_pcUsPerLocalUs =
+								(1.0 - HEARTBEAT_SCALE_GAIN_LOCKED) * _pcUsPerLocalUs +
+								HEARTBEAT_SCALE_GAIN_LOCKED * raw_scale;
+						} else {
+							_pcUsPerLocalUs = raw_scale;
+							_hasClockScale = true;
+						}
 					} else {
-						_pcUsPerLocalUs = raw_scale;
-						_hasClockScale = true;
+						_pcUsPerLocalUs =
+							(1.0 - HEARTBEAT_SCALE_GAIN_PRELOCK) * _pcUsPerLocalUs +
+							HEARTBEAT_SCALE_GAIN_PRELOCK * raw_scale;
 					}
 				}
 			}
 		} else if (!_cfg.enable_pc_clock_drift_correction) {
 			_pcUsPerLocalUs = 1.0;
 			_hasClockScale = false;
+			_goodHeartbeatPairs = 0;
+		}
+
+		if (_recording && _recordStartLocalUs != 0 && _recordStartPcUs == 0) {
+			_recordStartPcUs = _estimate_pc_time_us_scaled(_pcAnchorUs, _pcAnchorLocalUs, _recordStartLocalUs, _pcUsPerLocalUs);
 		}
 	}
-
-#if TINZR_ENABLE_BLE
-	if (_sdListPending) {
-		_sdListPending = false;
-		if (_bleStarted && _ble.connected()) {
-			_sendSdList();
-		}
-	}
-#endif
-
-
 
 	_handleStreaming();
 	_drainSdLogBuffer();
@@ -628,7 +649,7 @@ void TinZrWearableSDClass::_handleDeferredBleActions() {
 	// LS
 	if (_pendingSdList) {
 		_pendingSdList = false;
-		_sendSdList(); // this sends multiple notifies safely now
+		_sendSdList();
 	}
 
 	// GET
@@ -653,18 +674,35 @@ void TinZrWearableSDClass::_handleBLE() {
 	bool nowConn = _ble.connected();
 
 	if (!_bleWasConnected && nowConn) {
-		Serial.println("🟦 BLE connected → auto-start streaming");
-		_applyStreamingChange(true);
+		Serial.println("BLE connected");
+		_applyStreamingChange(_desiredStreamingEnabled());
 	}
 
 	if (_bleWasConnected && !nowConn) {
-		Serial.println("📡 BLE disconnected → stop streaming");
-		_applyStreamingChange(false);
+		Serial.println("BLE disconnected");
+		_applyStreamingChange(_desiredStreamingEnabled());
 	}
 
 	_bleWasConnected = nowConn;
 	_updateLED();
 #endif
+}
+
+bool TinZrWearableSDClass::_desiredStreamingEnabled() const {
+#if TINZR_ENABLE_BLE
+	return _recordArmed || (_bleStarted && _ble.connected());
+#else
+	return _recordArmed;
+#endif
+}
+
+bool TinZrWearableSDClass::_isAcquisitionActive() const {
+	return _streaming || _recordArmed || _recording;
+}
+
+bool TinZrWearableSDClass::_heartbeatIsFresh(uint32_t now_us) const {
+	if (!_hasPcAnchor || _lastHeartbeatUs == 0) return false;
+	return (uint32_t)(now_us - _lastHeartbeatUs) <= HEARTBEAT_FRESHNESS_TIMEOUT_US;
 }
 
 // ========== BLE write callback ==========
@@ -709,12 +747,17 @@ void TinZrWearableSDClass::_sendSdList() {
 		_ble.sendNotify((const uint8_t*)s, strlen(s));
 	};
 
-	if (!_sdReady) {
-		Serial.println("LS: SD not ready");
+	if (_isAcquisitionActive()) {
 		notify_txt("LS:BEGIN");
-		delay(10);
+		notify_txt("LS:ERR|BUSY");
+		notify_txt("LS:END");
+		return;
+	}
+
+	if (!_sdReady) {
+			Serial.println("SD not ready (logging disabled until inserted)");
+		notify_txt("LS:BEGIN");
 		notify_txt("LS:ERR|SD_NOT_READY");
-		delay(10);
 		notify_txt("LS:END");
 		return;
 	}
@@ -725,13 +768,11 @@ void TinZrWearableSDClass::_sendSdList() {
 	Serial.println(dir);
 
 	notify_txt("LS:BEGIN");
-	delay(15); // IMPORTANT: give BEGIN time to land
 
 	File d = SD.open(dir, FILE_READ);
 	if (!d) {
 		Serial.println("LS: open dir failed");
 		notify_txt("LS:ERR|OPEN_FAILED");
-		delay(10);
 		notify_txt("LS:END");
 		return;
 	}
@@ -740,7 +781,6 @@ void TinZrWearableSDClass::_sendSdList() {
 		Serial.println("LS: path is not a directory");
 		notify_txt("LS:ERR|NOT_A_DIR");
 		d.close();
-		delay(10);
 		notify_txt("LS:END");
 		return;
 	}
@@ -763,9 +803,6 @@ void TinZrWearableSDClass::_sendSdList() {
 
 			_ble.sendNotify((const uint8_t*)line.c_str(), line.length());
 
-			// Pacing: prevents notify drops on Windows/WinRT stacks
-			delay(15);
-
 			count++;
 		}
 		f.close();
@@ -776,7 +813,6 @@ void TinZrWearableSDClass::_sendSdList() {
 	Serial.print("LS: sent files = ");
 	Serial.println(count);
 
-	delay(15);
 	notify_txt("LS:END");
 #endif
 }
@@ -788,6 +824,15 @@ void TinZrWearableSDClass::_sendSdList() {
 
 void TinZrWearableSDClass::_startSdTransfer(const String& name) {
 	if (!_sdReady) return;
+	if (_isAcquisitionActive()) {
+#if TINZR_ENABLE_BLE
+		if (_bleStarted && _ble.connected()) {
+			const char* msg = "GET:ERR|BUSY";
+			_ble.sendNotify((const uint8_t*)msg, strlen(msg));
+		}
+#endif
+		return;
+	}
 
 	// Stop any previous transfer
 	if (_sdXferActive) {
@@ -843,6 +888,7 @@ void TinZrWearableSDClass::_pumpSdTransfer() {
 #else
 	if (!_sdXferActive) return;
 	if (!_bleStarted || !_ble.connected()) return;
+	if (_isAcquisitionActive()) return;
 
 	// If waiting for ACK, do nothing.
 	if (_sdXferWaitingAck) return;
@@ -920,7 +966,7 @@ void TinZrWearableSDClass::_handleBleCommand(const uint8_t* data, size_t len) {
 	}
 
 	if (s.equalsIgnoreCase("LS")) {
-		_sdListPending = true;
+		_pendingSdList = true;
 		return;
 	}
 
@@ -1034,7 +1080,7 @@ void TinZrWearableSDClass::_handleBleCommand(const uint8_t* data, size_t len) {
 			}
 		} else {
 			if (!_parse_pc_timestr_to_epoch_us(t, pc_time_us)) {
-				Serial.println("⚠️ T: parse failed (ignored)");
+				Serial.println("T: parse failed (ignored)");
 				return;
 			}
 		}
@@ -1048,8 +1094,9 @@ void TinZrWearableSDClass::_handleBleCommand(const uint8_t* data, size_t len) {
 	}
 
 	if (s.equalsIgnoreCase("S")) {
-		Serial.println("→ ARM recording (requires heartbeat)");
+		Serial.println("ARM recording");
 		_recordArmed = true;
+		_applyStreamingChange(_desiredStreamingEnabled());
 
 #if TINZR_ENABLE_BLE
 		if (_bleStarted && _ble.connected()) {
@@ -1061,19 +1108,10 @@ void TinZrWearableSDClass::_handleBleCommand(const uint8_t* data, size_t len) {
 	}
 
 	if (s.equalsIgnoreCase("E")) {
-		Serial.println("→ DISARM recording");
+		Serial.println("DISARM recording");
 		_recordArmed = false;
-
-		if (_recording) {
-			_drainSdLogBuffer(true);
-			TinZrSD.flush();
-			TinZrSD.writeLine("====================RecordingEndsHere====================");
-			TinZrSD.flush();
-			TinZrSD.closeLog();
-			TinZrSD.setRecording(false);
-			_recording = false;
-			_resetSdLogBuffer();
-		}
+		_stopRecording("disarmed", true);
+		_applyStreamingChange(_desiredStreamingEnabled());
 
 #if TINZR_ENABLE_BLE
 		if (_bleStarted && _ble.connected()) {
@@ -1091,7 +1129,7 @@ void TinZrWearableSDClass::_applyStreamingChange(bool enable) {
 
 	if (enable) {
 		if (!_imuReady) {
-			Serial.println("❌ Cannot start streaming: IMU not ready");
+			Serial.println("Cannot start acquisition: IMU not ready");
 			_setErrorLED();
 			return;
 		}
@@ -1099,15 +1137,15 @@ void TinZrWearableSDClass::_applyStreamingChange(bool enable) {
 		_streaming          = true;
 		sFrameCount         = 0;
 		_lastSampleUs       = 0;
-		_resetSdLogBuffer();
 		sLastHr             = 0;
 		sLastSpo2           = 0;
 		sLastHrSpo2UpdateMs = 0;
 
-		Serial.println("▶ Streaming started (BLE GATT, TinZrCore sensors)");
+		Serial.println("Acquisition started");
 	} else {
 		_streaming = false;
-		Serial.println("⏹ Streaming stopped");
+		_lastSampleUs = 0;
+		Serial.println("Acquisition stopped");
 	}
 
 	_updateLED();
@@ -1118,21 +1156,125 @@ void TinZrWearableSDClass::_resetSdLogBuffer() {
 	_sdLogHead = 0;
 	_sdLogTail = 0;
 	_sdLogCount = 0;
-	_sdLogDroppedLines = 0;
 	_lastSdFlushMs = 0;
+	_sdFlushPending = false;
+	_sdBackpressureFlag = false;
 }
 
 bool TinZrWearableSDClass::_queueSdLogLine(const char* line) {
 	if (!line) return false;
 	if (_sdLogCount >= SD_LOG_QUEUE_DEPTH) {
-		_sdLogDroppedLines++;
+		_sdLogDroppedLinesTotal++;
+		_sdBackpressureFlag = true;
 		return false;
 	}
 
 	snprintf(_sdLogQueue[_sdLogHead], SD_LOG_LINE_MAX, "%s", line);
 	_sdLogHead = (_sdLogHead + 1) % SD_LOG_QUEUE_DEPTH;
 	_sdLogCount++;
+	if (_sdLogCount >= SD_FLUSH_QUEUE_THRESHOLD) {
+		_sdFlushPending = true;
+	}
 	return true;
+}
+
+bool TinZrWearableSDClass::_beginRecording(uint32_t now_us) {
+	if (_recording) return true;
+	if (!_sdReady) {
+			Serial.println("SD not ready (logging disabled until inserted)");
+		_updateLED();
+		return false;
+	}
+
+	String safe = _sanitize_subject_for_filename(_participant);
+	String base;
+	if (_hasPcAnchorStr && _pcAnchorStr.length()) {
+		String safeTs = _sanitize_pc_time_for_filename(_pcAnchorStr);
+		base = safe + "__" + safeTs;
+	} else if (_pcAnchorUs != 0) {
+		base = safe + "__" + String((unsigned long long)(_pcAnchorUs / 1000ULL));
+	} else {
+		base = safe + "__local_" + String((unsigned long)millis());
+	}
+
+	Serial.print("SD start: ");
+	Serial.println(base);
+
+	if (!TinZrSD.openLog(base.c_str(), "csv", nullptr, true, false)) {
+		Serial.println("Failed to open SD log");
+		_sdReady = false;
+		_updateLED();
+		return false;
+	}
+
+	_recording = true;
+	_sampleIdx = 0;
+	_recordStartLocalUs = now_us;
+	_recordStartPcUs = 0;
+	_sdLogDroppedLinesTotal = 0;
+	_sdLogDroppedLinesReported = 0;
+	_lastLagIntervalsThisSample = 0;
+	if (_hasPcAnchor && _pcAnchorUs != 0) {
+		_recordStartPcUs = _estimate_pc_time_us_scaled(_pcAnchorUs, _pcAnchorLocalUs, now_us, _pcUsPerLocalUs);
+	}
+	_resetSdLogBuffer();
+	TinZrSD.setRecording(true);
+
+	_write_log_metadata_header(
+		base,
+		_cfg,
+		_participant,
+		_pcAnchorStr,
+		_hasPcAnchorStr,
+		_pcAnchorUs,
+		now_us,
+		_pcUsPerLocalUs,
+		_hasClockScale
+	);
+
+	uint8_t  batt_pct;     // last battery % (0-100)
+
+#if TINZR_ENABLE_BLE
+	if (_bleStarted && _ble.connected()) {
+		const char* msg = "LOG:STARTED";
+		_ble.sendNotify((const uint8_t*)msg, strlen(msg));
+	}
+#endif
+	_updateLED();
+	return true;
+}
+
+void TinZrWearableSDClass::_stopRecording(const char* reason, bool writeEndMarker) {
+	if (!_recording) return;
+
+	_drainSdLogBuffer(true);
+	if (_sdLogCount != 0) {
+		Serial.print("WARNING: closing log with pending queued lines: ");
+		Serial.println((unsigned)_sdLogCount);
+	}
+	if (writeEndMarker && TinZrSD.logOpen()) {
+		TinZrSD.writeLine("====================RecordingEndsHere====================");
+	}
+	if (reason && reason[0] != '\0') {
+		Serial.print("SD stop: ");
+		Serial.println(reason);
+	}
+	TinZrSD.flush();
+	TinZrSD.closeLog();
+	TinZrSD.setRecording(false);
+	_recording = false;
+	_sampleIdx = 0;
+	_recordStartPcUs = 0;
+	_recordStartLocalUs = 0;
+	_resetSdLogBuffer();
+
+#if TINZR_ENABLE_BLE
+	if (_bleStarted && _ble.connected()) {
+		const char* msg = "LOG:STOPPED";
+		_ble.sendNotify((const uint8_t*)msg, strlen(msg));
+	}
+#endif
+	_updateLED();
 }
 
 void TinZrWearableSDClass::_drainSdLogBuffer(bool forceFlush) {
@@ -1141,23 +1283,47 @@ void TinZrWearableSDClass::_drainSdLogBuffer(bool forceFlush) {
 		return;
 	}
 
+	const uint32_t start_us = micros();
+	size_t lines_written = 0;
 	while (_sdLogCount > 0) {
+		if (!forceFlush) {
+			const uint32_t elapsed_us = (uint32_t)(micros() - start_us);
+			if (lines_written >= SD_LOG_DRAIN_MAX_LINES_PER_PASS || elapsed_us >= SD_LOG_DRAIN_MAX_US_PER_PASS) {
+				break;
+			}
+		}
+
 		if (!TinZrSD.writeLine(String(_sdLogQueue[_sdLogTail]))) {
+			_sdFlushPending = true;
+			_sdBackpressureFlag = true;
 			break;
 		}
 		_sdLogTail = (_sdLogTail + 1) % SD_LOG_QUEUE_DEPTH;
 		_sdLogCount--;
+		lines_written++;
 	}
 
-	if (_sdLogDroppedLines != 0) {
+	if (_sdLogDroppedLinesTotal != _sdLogDroppedLinesReported) {
 		Serial.print("WARNING: SD log queue overflow, dropped lines: ");
-		Serial.println(_sdLogDroppedLines);
-		_sdLogDroppedLines = 0;
+		Serial.println(_sdLogDroppedLinesTotal);
+		_sdLogDroppedLinesReported = _sdLogDroppedLinesTotal;
 	}
 
 	const unsigned long now_ms = millis();
-	if (forceFlush || _lastSdFlushMs == 0 || (uint32_t)(now_ms - _lastSdFlushMs) >= 1000UL) {
+	const bool flush_due =
+		forceFlush ||
+		(_sdLogCount > 0 && _lastSdFlushMs != 0 && (uint32_t)(now_ms - _lastSdFlushMs) >= SD_FLUSH_PERIOD_MS) ||
+		(_sdLogCount >= SD_FLUSH_QUEUE_THRESHOLD) ||
+		_sdFlushPending;
+
+	if (flush_due) {
 		TinZrSD.flush();
+		_lastSdFlushMs = now_ms;
+		_sdFlushPending = false;
+		if (_sdLogCount == 0) {
+			_sdBackpressureFlag = false;
+		}
+	} else if (_lastSdFlushMs == 0) {
 		_lastSdFlushMs = now_ms;
 	}
 }
@@ -1168,19 +1334,25 @@ void TinZrWearableSDClass::_handleStreaming() {
 	const uint32_t sample_interval_us = (uint32_t)_cfg.sample_interval_ms * 1000UL;
 	static constexpr uint32_t MAX_SAMPLE_LAG_INTERVALS = 4;
 
+	if (!_isAcquisitionActive()) return;
 	if (sample_interval_us == 0) return;
 	if (_lastSampleUs == 0) {
 		_lastSampleUs = now_us;
+		_lastLagIntervalsThisSample = 0;
 		return;
 	}
 
 	const uint32_t elapsed_us = (uint32_t)(now_us - _lastSampleUs);
 	if (elapsed_us < sample_interval_us) return;
 
+	_lastLagIntervalsThisSample = 0;
 	const uint32_t elapsed_intervals = elapsed_us / sample_interval_us;
 	if (elapsed_intervals > 1) {
 		const uint32_t skipped_intervals = elapsed_intervals - 1;
-		_sampleIdx += skipped_intervals;
+		_lastLagIntervalsThisSample = skipped_intervals;
+		if (_recording) {
+			_sampleIdx += skipped_intervals;
+		}
 
 		if (elapsed_intervals > MAX_SAMPLE_LAG_INTERVALS) {
 			_lastSampleUs = now_us - sample_interval_us;
@@ -1193,96 +1365,15 @@ void TinZrWearableSDClass::_handleStreaming() {
 
 	if (!_imuReady) return;
 
-	// Heartbeat is valid if armed + anchor received + within timeout
-	const bool heartbeat_ok =
-		_recordArmed &&
-		_hasPcAnchor &&
-		(_lastHeartbeatUs != 0) &&
-		(uint32_t)(now_us - _lastHeartbeatUs) <= HEARTBEAT_TIMEOUT_US;
-
-	// Start SD recording automatically when heartbeat_ok
-	if (heartbeat_ok && !_recording) {
-		if (!_sdReady) {
-			Serial.println("⚠️ SD not ready → cannot start recording");
-			_recording = false;
-			_updateLED(); // ensures FAIL_BLINK persists
-		} else {
-			String safe = _sanitize_subject_for_filename(_participant);
-
-			String base;
-			if (_hasPcAnchorStr && _pcAnchorStr.length()) {
-				String safeTs = _sanitize_pc_time_for_filename(_pcAnchorStr);
-				base = safe + "__" + safeTs;
-			} else {
-				base = safe + "__" + String((unsigned long long)(_pcAnchorUs / 1000ULL));
-			}
-
-			Serial.print("📝 SD start: ");
-			Serial.println(base);
-
-			if (!TinZrSD.openLog(base.c_str(), "csv", nullptr, true, false)) {
-				Serial.println("❌ Failed to open SD log");
-				_recording = false;
-
-				// Treat as SD failure → fail blink until recovered
-				_sdReady = false;
-				_updateLED();
-			} else {
-				// ---- IMPORTANT: start-time for log timebase (time_elapsed_estimated_from_pc_heartbeats_ms) ----
-				_recording = true;
-				_sampleIdx = 0;
-				_recordStartLocalUs = now_us;
-				_recordStartPcUs = _estimate_pc_time_us_scaled(_pcAnchorUs, _pcAnchorLocalUs, now_us, _pcUsPerLocalUs);
-				_resetSdLogBuffer();
-				TinZrSD.setRecording(true);
-
-				// write metadata header... use the PC time string/epoch for "start", not local millis
-				_write_log_metadata_header(
-					base,
-					_cfg,
-					_participant,
-					_pcAnchorStr,
-					_hasPcAnchorStr,
-					_pcAnchorUs,
-					now_us,
-					_pcUsPerLocalUs,
-					_hasClockScale
-				);
-
-				// CSV header
-				TinZrSD.writeLine("time_elapsed_estimated_from_pc_heartbeats_ms,time_elapsed_estimated_from_pc_heartbeats_datetime,time_heartbeat_anchor_from_pc_datetime,time_elapsed_with_ideal_sample_interval_ms,red,ir,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,batt_pct,hr_bpm,spo2_pct");
-
-#if TINZR_ENABLE_BLE
-				if (_bleStarted && _ble.connected()) {
-					const char* msg = "LOG:STARTED";
-					_ble.sendNotify((const uint8_t*)msg, strlen(msg));
-				}
-#endif
-				_updateLED(); // enter OTA_ACTIVE
-			}
+	if (_recordArmed && !_recording) {
+		if (!_beginRecording(now_us)) {
+			return;
 		}
 	}
 
-	// Stop recording if heartbeat missing
-	if (!heartbeat_ok && _recording) {
-		_drainSdLogBuffer(true);
-		Serial.println("⏹ SD stop (heartbeat missing or disarmed)");
-		TinZrSD.flush();
-		TinZrSD.closeLog();
-		TinZrSD.setRecording(false);
-		_recording = false;
-		_sampleIdx = 0;
-		_recordStartPcUs = 0;
-		_recordStartLocalUs = 0;
-		_resetSdLogBuffer();
-
-#if TINZR_ENABLE_BLE
-		if (_bleStarted && _ble.connected()) {
-			const char* msg = "LOG:STOPPED";
-			_ble.sendNotify((const uint8_t*)msg, strlen(msg));
-		}
-#endif
-		_updateLED();
+	if (!_recordArmed && _recording) {
+		_stopRecording("disarmed");
+		return;
 	}
 
 	// Read sensors via TinZrCore
@@ -1316,23 +1407,19 @@ void TinZrWearableSDClass::_handleStreaming() {
 		sLastSpo2 = 0;
 	}
 
+	const float red_nA = red_raw * PPG_ADC_FULL_SCALE_NA / PPG_ADC_MAX_COUNT;
+	const float ir_nA  = ir_raw  * PPG_ADC_FULL_SCALE_NA / PPG_ADC_MAX_COUNT;
+
 	// Battery refresh (every 5 min or forced)
 	if (sLastBattSampleMs == 0 || (now_ms - sLastBattSampleMs) >= BATT_PERIOD_MS) {
 		sLastBattSampleMs = now_ms;
 		sLastBattPct      = read_battery_pct();
 	}
 
-	// If recording, but SD disappears mid-run → stop + FAIL_BLINK until hot-plug recovers
+	// If recording, but SD disappears mid-run -> stop + FAIL_BLINK until hot-plug recovers
 	if (_recording) {
 		if (!_sdReady || !TinZrSD.logOpen()) {
-			Serial.println("❌ SD removed/unavailable → stopping recording");
-			TinZrSD.flush();
-			TinZrSD.closeLog();
-			TinZrSD.setRecording(false);
-			_recording = false;
-			_sampleIdx = 0; 
-
-			_resetSdLogBuffer();
+			_stopRecording("sd unavailable");
 			_sdReady = false; // force FAIL_BLINK until _probeSDHotplug() succeeds
 			_updateLED();
 			return;
@@ -1341,54 +1428,98 @@ void TinZrWearableSDClass::_handleStreaming() {
 
 	// Write to SD
 	if (_recording && TinZrSD.logOpen()) {
+		const uint32_t sample_idx = _sampleIdx;
+		const uint32_t local_elapsed_us = (_recordStartLocalUs != 0)
+			? (uint32_t)(now_us - _recordStartLocalUs)
+			: 0U;
+		const size_t queue_depth_at_sample = _sdLogCount;
+		const uint32_t dropped_log_lines_total = _sdLogDroppedLinesTotal;
+		const uint8_t sd_backpressure_flag = _sdBackpressureFlag ? 1U : 0U;
+		bool hasPcAnchor = false;
+		bool hasClockScale = false;
 		uint64_t pcAnchorUs = 0;
 		uint32_t pcAnchorLocalUs = 0;
 		uint32_t lastHeartbeatUs = 0;
 		double pcUsPerLocalUs = 1.0;
 		noInterrupts();
+		hasPcAnchor = _hasPcAnchor;
+		hasClockScale = _hasClockScale;
 		pcAnchorUs = _pcAnchorUs;
 		pcAnchorLocalUs = _pcAnchorLocalUs;
 		lastHeartbeatUs = _lastHeartbeatUs;
 		pcUsPerLocalUs = _pcUsPerLocalUs;
 		interrupts();
 
-		const uint64_t pc_time_us = _estimate_pc_time_us_scaled(pcAnchorUs, pcAnchorLocalUs, now_us, pcUsPerLocalUs);
+		const bool hasPcTime = (hasPcAnchor && pcAnchorUs != 0);
+		const bool heartbeat_present = hasPcAnchor && lastHeartbeatUs != 0;
+		const bool heartbeat_fresh = heartbeat_present && _heartbeatIsFresh(now_us);
+		const uint64_t pc_time_us = hasPcTime
+			? _estimate_pc_time_us_scaled(pcAnchorUs, pcAnchorLocalUs, now_us, pcUsPerLocalUs)
+			: 0ULL;
 		const uint64_t t_ms = (_recordStartPcUs != 0 && pc_time_us >= _recordStartPcUs)
 			? ((pc_time_us - _recordStartPcUs) / 1000ULL)
 			: 0ULL;
-		const uint64_t t_nominal_ms = (uint64_t)_sampleIdx * (uint64_t)_cfg.sample_interval_ms;
+		const uint64_t t_nominal_ms = (uint64_t)sample_idx * (uint64_t)_cfg.sample_interval_ms;
 		_sampleIdx++;
 
 
 		char pc_time_iso[32];
 		char sync_pc_time_iso[32];
+		char heartbeat_age_buf[24];
+		char pc_scale_buf[24];
 		char line[SD_LOG_LINE_MAX];
 
 		// Log the exact heartbeat anchor on the sample nearest to its arrival, else 0.
 		uint64_t sync_pc_time_us = 0;
-		if (lastHeartbeatUs != 0) {
+		if (heartbeat_present) {
 			const uint32_t dt_us = (uint32_t)(now_us - lastHeartbeatUs);
 			if (dt_us <= sample_interval_us) {
 				sync_pc_time_us = pcAnchorUs;
 			}
 		}
 
-		_format_epoch_us_iso(pc_time_us, pc_time_iso, sizeof(pc_time_iso));
+		if (pc_time_us != 0) {
+			_format_epoch_us_iso(pc_time_us, pc_time_iso, sizeof(pc_time_iso));
+		} else {
+			pc_time_iso[0] = '\0';
+		}
 		if (sync_pc_time_us != 0) {
 			_format_epoch_us_iso(sync_pc_time_us, sync_pc_time_iso, sizeof(sync_pc_time_iso));
 		} else {
 			sync_pc_time_iso[0] = '\0';
 		}
 
+		if (heartbeat_present) {
+			snprintf(heartbeat_age_buf, sizeof(heartbeat_age_buf), "%lu", (unsigned long)(now_us - lastHeartbeatUs));
+		} else {
+			heartbeat_age_buf[0] = '\0';
+		}
+
+		if (hasClockScale) {
+			snprintf(pc_scale_buf, sizeof(pc_scale_buf), "%.9f", pcUsPerLocalUs);
+		} else {
+			pc_scale_buf[0] = '\0';
+		}
+
 		snprintf(
 			line, sizeof(line),
-			"%llu,%s,%s,%llu,%lu,%lu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%u,%u,%u",
+			"%lu,%lu,%llu,%llu,%s,%s,%s,%u,%u,%s,%u,%lu,%lu,%u,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%u,%u,%u",
+			(unsigned long)local_elapsed_us,
+			(unsigned long)sample_idx,
+			(unsigned long long)t_nominal_ms,
 			(unsigned long long)t_ms,
 			pc_time_iso,
 			sync_pc_time_iso,
-			(unsigned long long)t_nominal_ms,
-			(unsigned long)red_raw,
-			(unsigned long)ir_raw,
+			heartbeat_age_buf,
+			(unsigned)heartbeat_present,
+			(unsigned)heartbeat_fresh,
+			pc_scale_buf,
+			(unsigned)queue_depth_at_sample,
+			(unsigned long)dropped_log_lines_total,
+			(unsigned long)_lastLagIntervalsThisSample,
+			(unsigned)sd_backpressure_flag,
+			(double)red_nA,
+			(double)ir_nA,
 			(double)imu.ax_g, (double)imu.ay_g, (double)imu.az_g,
 			(double)imu.gx_dps, (double)imu.gy_dps, (double)imu.gz_dps,
 			(unsigned)sLastBattPct,
@@ -1408,34 +1539,15 @@ void TinZrWearableSDClass::_updateLED() {
 		return;
 	}
 
-	const unsigned long now = millis();
-
-	const bool heartbeat_ok =
-		_recordArmed &&
-		_hasPcAnchor &&
-		(_lastHeartbeatUs != 0) &&
-		(uint32_t)(micros() - _lastHeartbeatUs) <= HEARTBEAT_TIMEOUT_US;
-
-	// 🔴 Highest priority: SD missing → FAIL_BLINK (red blink) forever until reinserted
 	if (!_sdReady) {
 		TinZrLED.setMode(TinZrStatusLED::Mode::FAIL_BLINK);
 		return;
 	}
 
-	// If connected:
-	if (_bleWasConnected) {
-		// 🟦 Priority: logging/recording state → OTA_ACTIVE (cyan blink)
-		if (_recording || heartbeat_ok) {
-			TinZrLED.setMode(TinZrStatusLED::Mode::OTA_ACTIVE);
-		}
-		// 🟢 Next: streaming (but not recording) → BLE_CONNECTED (solid green)
-		else if (_streaming) {
-			TinZrLED.setMode(TinZrStatusLED::Mode::BLE_CONNECTED);
-		}
-		// 🔄 Else: advertising blink
-		else {
-			TinZrLED.setMode(TinZrStatusLED::Mode::BLE_ADVERTISING);
-		}
+	if (_recording) {
+		TinZrLED.setMode(TinZrStatusLED::Mode::OTA_ACTIVE);
+	} else if (_streaming) {
+		TinZrLED.setMode(TinZrStatusLED::Mode::BLE_CONNECTED);
 	} else {
 		TinZrLED.setMode(TinZrStatusLED::Mode::BLE_ADVERTISING);
 	}

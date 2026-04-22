@@ -53,19 +53,27 @@ private:
 	bool     _streaming    = false;
 	uint32_t _lastSampleUs = 0;
 	bool     _wasSoftOn    = false;
-	static constexpr size_t SD_LOG_LINE_MAX = 320;
-	static constexpr size_t SD_LOG_QUEUE_DEPTH = 32;
+	static constexpr size_t SD_LOG_LINE_MAX = 448;
+	static constexpr size_t SD_LOG_QUEUE_DEPTH = 128;
 	char     _sdLogQueue[SD_LOG_QUEUE_DEPTH][SD_LOG_LINE_MAX]{};
 	size_t   _sdLogHead = 0;
 	size_t   _sdLogTail = 0;
 	size_t   _sdLogCount = 0;
-	uint32_t _sdLogDroppedLines = 0;
+	uint32_t _sdLogDroppedLinesTotal = 0;
+	uint32_t _sdLogDroppedLinesReported = 0;
 	unsigned long _lastSdFlushMs = 0;
+	bool     _sdFlushPending = false;
+	bool     _sdBackpressureFlag = false;
+	uint32_t _lastLagIntervalsThisSample = 0;
+	static constexpr size_t SD_LOG_DRAIN_MAX_LINES_PER_PASS = 2;
+	static constexpr uint32_t SD_LOG_DRAIN_MAX_US_PER_PASS = 1500UL;
+	static constexpr uint32_t SD_FLUSH_PERIOD_MS = 3000UL;
+	static constexpr size_t SD_FLUSH_QUEUE_THRESHOLD = SD_LOG_QUEUE_DEPTH / 2;
 
-	// ===== SD logging controlled by PC heartbeat =====
+	// ===== SD logging =====
 	bool     _sdReady             = false;
 	bool     _recordArmed         = false;   // set by GUI (START/STOP)
-	bool     _recording           = false;   // actual: armed + heartbeat OK
+	bool     _recording           = false;   // actual: armed + SD log open
 	String   _participant         = "";
 
 	uint32_t _lastHeartbeatUs     = 0;       // local micros when last T: received
@@ -79,6 +87,15 @@ private:
 	uint32_t _prevPcAnchorLocalUs = 0;
 	uint64_t _recordStartPcUs     = 0;
 	uint32_t _recordStartLocalUs  = 0;
+	uint8_t  _goodHeartbeatPairs  = 0;
+	static constexpr uint8_t HEARTBEAT_SCALE_LOCK_MIN_PAIRS = 3;
+	static constexpr uint32_t HEARTBEAT_MIN_INTERVAL_US = 250000UL;
+	static constexpr uint32_t HEARTBEAT_MAX_INTERVAL_US = 4000000UL;
+	static constexpr uint32_t HEARTBEAT_FRESHNESS_TIMEOUT_US = 2500000UL;
+	static constexpr double HEARTBEAT_SCALE_MIN = 0.98;
+	static constexpr double HEARTBEAT_SCALE_MAX = 1.02;
+	static constexpr double HEARTBEAT_SCALE_GAIN_PRELOCK = 0.15;
+	static constexpr double HEARTBEAT_SCALE_GAIN_LOCKED = 0.05;
 
 	// --- deferred BLE actions (do NOT notify inside onWrite) ---
 	volatile bool _pendingSdList = false;
@@ -97,12 +114,6 @@ private:
 	// NEW: SD hot-plug probing state
 	unsigned long _lastSdProbeMs  = 0;
 
-	// NEW: whether we already wrote the metadata header for the current file
-	bool     _logHeaderWritten    = false;
-
-	static constexpr uint32_t HEARTBEAT_TIMEOUT_MS = 6500UL; // stop logging if heartbeat missing
-	static constexpr uint32_t HEARTBEAT_TIMEOUT_US = HEARTBEAT_TIMEOUT_MS * 1000UL;
-
 	// Internal handlers
 	static TinZrWearableSDClass* _self;
 	static void _bleWriteStatic(const uint8_t* data, size_t len);
@@ -114,35 +125,35 @@ private:
 	void _drainSdLogBuffer(bool forceFlush = false);
 	bool _queueSdLogLine(const char* line);
 	void _resetSdLogBuffer();
+	bool _beginRecording(uint32_t now_us);
+	void _stopRecording(const char* reason = nullptr, bool writeEndMarker = false);
 	void _applyStreamingChange(bool enable);
+	bool _desiredStreamingEnabled() const;
+	bool _isAcquisitionActive() const;
+	bool _heartbeatIsFresh(uint32_t now_us) const;
 
 	// NEW: SD hot-plug probe helper
 	void _probeSDHotplug(unsigned long now);
 
-	// NEW: write metadata header + csv header (called once per log open)
-	void _writeLogHeaders(const String& file_base);
+	// =========================
+	// SD retrieval over BLE (verified transfer)
+	// =========================
+	void _sendSdList();
+	void _startSdTransfer(const String& name);
+	void _pumpSdTransfer();
+	uint32_t _crc32_file(File& f);
+	uint32_t _crc32_bytes(const uint8_t* data, size_t len, uint32_t crc);
 
-
-// =========================
-// SD retrieval over BLE (verified transfer)
-// =========================
-void _sendSdList();
-void _startSdTransfer(const String& name);
-void _pumpSdTransfer();
-uint32_t _crc32_file(File& f);
-uint32_t _crc32_bytes(const uint8_t* data, size_t len, uint32_t crc);
-
-bool     _sdXferActive      = false;
-bool     _sdXferWaitingAck  = false;
-uint16_t _sdXferSeq         = 0;
-uint16_t _sdXferLastSeqSent = 0;
-String   _sdXferName;
-File     _sdXferFile;
-uint32_t _sdXferFileCrc32   = 0;
-size_t   _sdXferFileSize    = 0;
-uint8_t  _sdXferLastPayload[200];
-uint16_t _sdXferLastLen     = 0;
-volatile bool _sdListPending = false;
+	bool     _sdXferActive      = false;
+	bool     _sdXferWaitingAck  = false;
+	uint16_t _sdXferSeq         = 0;
+	uint16_t _sdXferLastSeqSent = 0;
+	String   _sdXferName;
+	File     _sdXferFile;
+	uint32_t _sdXferFileCrc32   = 0;
+	size_t   _sdXferFileSize    = 0;
+	uint8_t  _sdXferLastPayload[200];
+	uint16_t _sdXferLastLen     = 0;
 
 
 	// LED
