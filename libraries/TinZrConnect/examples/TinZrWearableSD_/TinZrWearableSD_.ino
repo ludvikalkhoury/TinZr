@@ -4,7 +4,8 @@
  * ================================================================
  *
  * This example records TinZr wearable sensor data directly to a
- * microSD card. The onboard push button toggles recording on and off:
+ * microSD card. Holding the onboard push button for 3 seconds toggles
+ * recording on and off:
  *
  *   - Red LED:    stopped / ready
  *   - Green LED:  recording
@@ -57,7 +58,7 @@
 TinZrWearableSDConfig cfg = {
 	.sample_interval_ms = 4,      // 250 Hz
 	.sd_log_dir         = "/TinZrLogs",
-	.hostname           = "TinZrBlack"
+	.hostname           = "TinZrBlue"
 };
 
 void setup() {

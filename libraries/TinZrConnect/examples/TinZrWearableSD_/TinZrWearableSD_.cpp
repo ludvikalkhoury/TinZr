@@ -177,7 +177,7 @@ bool TinZrWearableSD_Class::readButtonPressed() {
 	return digitalRead(PB_PIN) == LOW;
 }
 
-bool TinZrWearableSD_Class::buttonPressedEvent() {
+bool TinZrWearableSD_Class::buttonHoldEvent() {
 	bool now = readButtonPressed();
 	bool event = false;
 
@@ -188,7 +188,25 @@ bool TinZrWearableSD_Class::buttonPressedEvent() {
 	if ((millis() - lastDebounceMs) > 40) {
 		if (now != stableButton) {
 			stableButton = now;
-			if (stableButton) event = true;
+
+			if (stableButton) {
+				buttonHoldActive = true;
+				buttonHoldEventSent = false;
+				buttonHoldStartMs = millis();
+			} else {
+				buttonHoldActive = false;
+				buttonHoldEventSent = false;
+				buttonHoldStartMs = 0;
+			}
+		}
+	}
+
+	if (buttonHoldActive && now) {
+		uint32_t heldMs = millis() - buttonHoldStartMs;
+
+		if (heldMs >= 3000 && !buttonHoldEventSent) {
+			buttonHoldEventSent = true;
+			event = true;
 		}
 	}
 
@@ -582,7 +600,7 @@ void TinZrWearableSD_Class::handle() {
 		startRecording();
 	}
 
-	if (buttonPressedEvent()) {
+	if (buttonHoldEvent()) {
 		if (!recording) {
 			bleStartArmed = false;
 			pendingBleStart = false;

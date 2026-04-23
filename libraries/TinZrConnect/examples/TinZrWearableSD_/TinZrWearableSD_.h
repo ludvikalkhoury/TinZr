@@ -78,7 +78,10 @@ private:
 
 	bool lastButton = false;
 	bool stableButton = false;
+	bool buttonHoldActive = false;
+	bool buttonHoldEventSent = false;
 	uint32_t lastDebounceMs = 0;
+	uint32_t buttonHoldStartMs = 0;
 
 	uint32_t recordStartMs = 0;     // real millis() at recording start
 	uint32_t scheduledMs   = 0;     // ideal sample schedule in millis()
@@ -101,7 +104,7 @@ private:
 	void sendBatteryLevel();
 
 	bool readButtonPressed();
-	bool buttonPressedEvent();
+	bool buttonHoldEvent();
 
 	bool ensureDir(const char* path);
 	const char* logDir() const;

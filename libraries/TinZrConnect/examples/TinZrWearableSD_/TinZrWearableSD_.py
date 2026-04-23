@@ -4,10 +4,10 @@ TinZr Wearable SD logger GUI for the start-only BLE firmware.
 Workflow:
 1. Keep the TinZr devices as close as possible to the host computer.
 2. Pair the TinZr devices with the host, then scan/connect from this GUI.
-3. Start recording from the GUI or with the TinZr side button.
+3. Start recording from the GUI or by holding the TinZr side button for 3 seconds.
 4. The GUI sends one PC timestamp for later synchronization before the start command.
 5. After a GUI start, the device reports battery level, shuts down BLE, and logs locally to SD.
-6. Stop recording only with the TinZr side button.
+6. Stop recording only by holding the TinZr side button for 3 seconds.
 """
 
 import os
@@ -642,7 +642,7 @@ class TinZrWearableSD(QtWidgets.QWidget):
 			self._invoke(self, "_ui_set_record_toggle", True, False)
 			self._invoke(self, "_ui_enable_participant_controls", False)
 			self._invoke(self, "_ui_enable_sd_retrieve", False)
-			self._log(f"Recording started on {alias}. BLE disconnected as expected. Stop with the TinZr side button.")
+			self._log(f"Recording started on {alias}. BLE disconnected as expected. Stop by holding the TinZr side button for 3 seconds.")
 			return
 
 		if not self._any_connected():
@@ -769,7 +769,7 @@ class TinZrWearableSD(QtWidgets.QWidget):
 		self.label_status = QtWidgets.QLabel("Status: Idle")
 		self.label_instructions = QtWidgets.QLabel(
 			"Keep TinZrs close to this computer. Pair them first, then connect and start recording. "
-			"To stop, press the TinZr side button."
+			"To stop, hold the TinZr side button for 3 seconds."
 		)
 		self.label_instructions.setWordWrap(True)
 		self.label_status.setStyleSheet("font-size: 9pt; color: #A8B3CF;")
@@ -818,7 +818,7 @@ class TinZrWearableSD(QtWidgets.QWidget):
 			"3. Enter a participant name before starting.\n"
 			"4. Press Start Recording to send participant, device name, and PC timestamp.\n"
 			"5. BLE turns off during SD logging to avoid timing drift.\n"
-			"6. Stop recording only with the TinZr side button.\n\n"
+			"6. Stop recording only by holding the TinZr side button for 3 seconds.\n\n"
 			"LED colors\n"
 			"Flashing Red: SD card not detected at the firmware reset time.\n"
 			"Red: standby, BLE available.\n"
@@ -1449,7 +1449,7 @@ class TinZrWearableSD(QtWidgets.QWidget):
 			return
 
 		if self._logging_armed:
-			self._log("Recording already started. Stop with the TinZr side button.")
+			self._log("Recording already started. Stop by holding the TinZr side button for 3 seconds.")
 			self._invoke(self, "_ui_set_record_toggle", True, False)
 			return
 
@@ -1498,7 +1498,7 @@ class TinZrWearableSD(QtWidgets.QWidget):
 			self._invoke(self, "_ui_set_record_toggle", True, False)
 			self._invoke(self, "_ui_enable_participant_controls", False)
 			self._invoke(self, "_ui_enable_sd_retrieve", False)
-			self._log("Start command sent. BLE will disconnect and logging will continue on SD. Stop with the TinZr side button.")
+			self._log("Start command sent. BLE will disconnect and logging will continue on SD. Stop by holding the TinZr side button for 3 seconds.")
 
 		except Exception as e:
 			self._log(f"Start logging failed: {e}")
@@ -1506,7 +1506,7 @@ class TinZrWearableSD(QtWidgets.QWidget):
 			self._invoke(self, "_ui_set_record_toggle", False, True)
 
 	async def _stop_logging_all(self):
-		self._log("Stop recording with the TinZr side button.")
+		self._log("Stop recording by holding the TinZr side button for 3 seconds.")
 
 	def _poll_battery_all(self):
 		if not self._any_connected():
