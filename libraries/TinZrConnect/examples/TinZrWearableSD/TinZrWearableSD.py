@@ -1,3 +1,15 @@
+"""
+TinZr Wearable SD logger GUI for the start-only BLE firmware.
+
+Workflow:
+1. Keep the TinZr devices as close as possible to the host computer.
+2. Pair the TinZr devices with the host, then scan/connect from this GUI.
+3. Start recording from the GUI or by holding the TinZr side button for 3 seconds.
+4. The GUI sends one PC timestamp for later synchronization before the start command.
+5. After a GUI start, the device reports battery level, shuts down BLE, and logs locally to SD.
+6. Stop recording only by holding the TinZr side button for 3 seconds.
+"""
+
 import os
 import sys
 import asyncio
@@ -31,17 +43,15 @@ TINZR_BLE_TX_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a9"  # device -> PC 
 DEVICE_PREFIX = "TinZr"
 
 CMD_START = b"S"
-CMD_STOP  = b"E"
 CMD_BATT  = b"BAT"
+CMD_TIME_PREFIX = "T:"
+CMD_DEVICE_PREFIX = "D:"
 
 CMD_SD_LS   = b"LS"
 CMD_SD_GETP = "GET:"
 CMD_SD_ACKP = "ACK:"
 CMD_SD_NAKP = "NAK:"
 
-CMD_EXP_META_PREFIX = "X:"
-
-HEARTBEAT_PERIOD_S = 1.0
 BATT_POLL_MS = 10 * 60 * 1000
 
 STATUS_FIXED_CHARS = 45
@@ -507,7 +517,7 @@ class TinZrWearableSD(QtWidgets.QWidget):
 		self.setWindowTitle("TinZr Wearable SD Logging")
 		self.setWindowIcon(QtGui.QIcon("TinZr_small_logo.ico"))
 
-		self.setFixedSize(600, 520)
+		self.setFixedSize(600, 550)
 		self.setWindowFlag(QtCore.Qt.MSWindowsFixedSizeDialogHint, True)
 
 		apply_tinzr_theme(self)
@@ -521,7 +531,7 @@ class TinZrWearableSD(QtWidgets.QWidget):
 		self._scan_devices = []
 		self.devices = {}
 		self._logging_armed = False
-		self.enable_heartbeats_during_logging = True
+		self._expect_disconnect_after_start = set()
 
 		self._sd_ls_buffers = {}
 		self._sd_ls_futures = {}
@@ -533,9 +543,6 @@ class TinZrWearableSD(QtWidgets.QWidget):
 		self.batt_timer = QtCore.QTimer(self)
 		self.batt_timer.timeout.connect(self._poll_battery_all)
 		self.batt_timer.start(BATT_POLL_MS)
-
-		self.heartbeat_timer = QtCore.QTimer(self)
-		self.heartbeat_timer.timeout.connect(self._send_heartbeat_all)
 
 		self.scan_finished.connect(self._on_scan_finished)
 
@@ -589,43 +596,13 @@ class TinZrWearableSD(QtWidgets.QWidget):
 
 	@QtCore.pyqtSlot(bool, bool)
 	def _ui_set_record_toggle(self, checked: bool, enabled: bool):
-		self.toggle_record.blockSignals(True)
-		self.toggle_record.setChecked(checked)
-		self.toggle_record.blockSignals(False)
-		self.toggle_record.setEnabled(enabled)
+		self.btn_start_recording.setEnabled(bool(enabled) and not bool(checked))
+		self.btn_start_recording.setText("Recording..." if checked else "Start Recording")
 
 	@QtCore.pyqtSlot(bool)
 	def _ui_enable_participant_controls(self, enabled: bool):
 		self.btn_set_participant.setEnabled(enabled)
 		self.edit_participant.setEnabled(enabled)
-
-	@QtCore.pyqtSlot()
-	def _gui_start_heartbeat(self):
-		if not self.enable_heartbeats_during_logging:
-			self._gui_stop_heartbeat()
-			return
-		self.heartbeat_timer.start(int(HEARTBEAT_PERIOD_S * 1000))
-		self._send_heartbeat_all()
-
-	@QtCore.pyqtSlot()
-	def _gui_stop_heartbeat(self):
-		if self.heartbeat_timer.isActive():
-			self.heartbeat_timer.stop()
-		if self.enable_heartbeats_during_logging:
-			self.label_hb.setText("Sync anchors: idle")
-		else:
-			self.label_hb.setText("Sync anchors: disabled")
-
-	@QtCore.pyqtSlot(int)
-	def _ui_set_heartbeat_mode(self, state: int):
-		self.enable_heartbeats_during_logging = bool(state)
-		if not self.enable_heartbeats_during_logging and self.heartbeat_timer.isActive():
-			self.heartbeat_timer.stop()
-		if self.enable_heartbeats_during_logging and self._logging_armed and not self.heartbeat_timer.isActive():
-			self.heartbeat_timer.start(int(HEARTBEAT_PERIOD_S * 1000))
-			self._send_heartbeat_all()
-		if not self._logging_armed:
-			self.label_hb.setText("Sync anchors: idle" if self.enable_heartbeats_during_logging else "Sync anchors: disabled")
 
 	@QtCore.pyqtSlot(bool)
 	def _ui_enable_sd_retrieve(self, enabled: bool):
@@ -647,6 +624,7 @@ class TinZrWearableSD(QtWidgets.QWidget):
 	
 	async def _handle_ble_disconnect(self, addr: str, why: str = "lost"):
 		alias = (self.devices.get(addr) or {}).get("alias", addr)
+		expected_after_start = addr in self._expect_disconnect_after_start
 
 		info = self.devices.get(addr)
 		if info:
@@ -658,10 +636,18 @@ class TinZrWearableSD(QtWidgets.QWidget):
 				self._invoke(row, "set_connected", False)
 				self._invoke(row, "set_connect_enabled", True)
 
+		if expected_after_start:
+			self._expect_disconnect_after_start.discard(addr)
+			self._logging_armed = True
+			self._invoke(self, "_ui_set_record_toggle", True, False)
+			self._invoke(self, "_ui_enable_participant_controls", False)
+			self._invoke(self, "_ui_enable_sd_retrieve", False)
+			self._log(f"Recording started on {alias}. BLE disconnected as expected. Stop by holding the TinZr side button for 3 seconds.")
+			return
+
 		if not self._any_connected():
 			if self._logging_armed:
 				self._logging_armed = False
-				self._stop_heartbeat_ui()
 				self._invoke(self, "_ui_force_logging_off")
 			self._invoke(self, "_ui_enable_sd_retrieve", False)
 			self._log(f"Disconnected ({why}): {alias}. No devices remain connected.")
@@ -699,13 +685,19 @@ class TinZrWearableSD(QtWidgets.QWidget):
 
 		title = QtWidgets.QLabel("TinZr Wearable SD")
 		title.setStyleSheet("font-size: 16pt; font-weight: 600; color: #E3F2FD;")
-		sub = QtWidgets.QLabel("Multi-device • autonomous local-time SD logging")
+		sub = QtWidgets.QLabel("Multi-device - autonomous local-time SD logging")
 		sub.setStyleSheet("font-size: 9pt; color: #A8B3CF;")
 
 		title_box.addWidget(title)
 		title_box.addWidget(sub)
 		h.addLayout(title_box, 1)
 		main_layout.addWidget(header)
+
+		self.tabs = QtWidgets.QTabWidget()
+		self.tab_logger = QtWidgets.QWidget()
+		logger_layout = QtWidgets.QVBoxLayout(self.tab_logger)
+		logger_layout.setContentsMargins(0, 0, 0, 0)
+		logger_layout.setSpacing(12)
 
 		ctrl_widget = QtWidgets.QFrame()
 		ctrl_widget.setObjectName("card")
@@ -726,7 +718,7 @@ class TinZrWearableSD(QtWidgets.QWidget):
 
 		self.combo_devices = QtWidgets.QComboBox()
 
-		self.btn_add = QtWidgets.QPushButton("＋")
+		self.btn_add = QtWidgets.QPushButton("+")
 		self.btn_add.setFixedSize(44, 34)
 		self.btn_add.setCursor(QtCore.Qt.PointingHandCursor)
 		self.btn_add.setToolTip("Add selected TinZr")
@@ -750,29 +742,6 @@ class TinZrWearableSD(QtWidgets.QWidget):
 		ctrl_layout.addWidget(self.btn_add, row, 4, 1, 1)
 		row += 1
 
-		lbl_record = QtWidgets.QLabel("SD Log (All)")
-		self.toggle_record = ToggleSwitch()
-		self.toggle_record.setChecked(False)
-		self.toggle_record.toggled.connect(self.on_record_toggled)
-
-		ctrl_layout.addWidget(lbl_record, row, 0)
-		ctrl_layout.addWidget(self.toggle_record, row, 1)
-
-		self.btn_retrieve_sd = QtWidgets.QPushButton("Retrieve from SD")
-		self.btn_retrieve_sd.clicked.connect(self.on_retrieve_sd_clicked)
-		self.btn_retrieve_sd.setEnabled(False)
-		ctrl_layout.addWidget(self.btn_retrieve_sd, row, 3, 1, 1)
-		row += 1
-
-		lbl_hb_mode = QtWidgets.QLabel("Sync anchors")
-		self.check_heartbeats = QtWidgets.QCheckBox("Send periodic PC anchors")
-		self.check_heartbeats.setChecked(self.enable_heartbeats_during_logging)
-		self.check_heartbeats.stateChanged.connect(lambda state: self._invoke(self, "_ui_set_heartbeat_mode", int(state)))
-
-		ctrl_layout.addWidget(lbl_hb_mode, row, 0)
-		ctrl_layout.addWidget(self.check_heartbeats, row, 1, 1, 4)
-		row += 1
-
 		lbl_part = QtWidgets.QLabel("Participant")
 		self.edit_participant = QtWidgets.QLineEdit()
 		self.edit_participant.setPlaceholderText("e.g., test001")
@@ -784,16 +753,34 @@ class TinZrWearableSD(QtWidgets.QWidget):
 		ctrl_layout.addWidget(self.btn_set_participant, row, 4)
 		row += 1
 
+		lbl_record = QtWidgets.QLabel("SD Log (All)")
+		self.btn_start_recording = QtWidgets.QPushButton("Start Recording")
+		self.btn_start_recording.clicked.connect(self.on_start_recording_clicked)
+
+		ctrl_layout.addWidget(lbl_record, row, 0)
+		ctrl_layout.addWidget(self.btn_start_recording, row, 1)
+
+		self.btn_retrieve_sd = QtWidgets.QPushButton("Retrieve from SD")
+		self.btn_retrieve_sd.clicked.connect(self.on_retrieve_sd_clicked)
+		self.btn_retrieve_sd.setEnabled(False)
+		self.btn_retrieve_sd.setVisible(False)
+		row += 1
+
 		self.label_status = QtWidgets.QLabel("Status: Idle")
-		self.label_hb = QtWidgets.QLabel("Sync anchors: idle")
+		self.label_instructions = QtWidgets.QLabel(
+			"Keep TinZrs close to this computer. Pair them first, then connect and start recording. "
+			"To stop, hold the TinZr side button for 3 seconds."
+		)
+		self.label_instructions.setWordWrap(True)
 		self.label_status.setStyleSheet("font-size: 9pt; color: #A8B3CF;")
 		self.label_status.setTextFormat(QtCore.Qt.PlainText)
-		self.label_hb.setStyleSheet("font-size: 9pt; color: #A8B3CF;")
+		self.label_instructions.setStyleSheet("font-size: 9pt; color: #A8B3CF;")
 
-		ctrl_layout.addWidget(self.label_status, row, 0, 1, 3)
-		ctrl_layout.addWidget(self.label_hb, row, 3, 1, 2)
+		ctrl_layout.addWidget(self.label_status, row, 0, 1, 5)
+		row += 1
+		ctrl_layout.addWidget(self.label_instructions, row, 0, 1, 5)
 
-		main_layout.addWidget(ctrl_widget)
+		logger_layout.addWidget(ctrl_widget)
 
 		list_card = QtWidgets.QFrame()
 		list_card.setObjectName("card")
@@ -817,9 +804,41 @@ class TinZrWearableSD(QtWidgets.QWidget):
 
 		self.scroll.setWidget(self.list_container)
 		list_lay.addWidget(self.scroll)
-		main_layout.addWidget(list_card)
+		logger_layout.addWidget(list_card)
 
-		self.toggle_record.setEnabled(False)
+		self.tab_help = QtWidgets.QWidget()
+		help_layout = QtWidgets.QVBoxLayout(self.tab_help)
+		help_layout.setContentsMargins(12, 12, 12, 12)
+		help_layout.setSpacing(10)
+
+		help_text = QtWidgets.QLabel(
+			"Operation\n"
+			"1. Keep the TinZrs close to this computer.\n"
+			"2. Pair them in Logger tab; scan then connect.\n"
+			"3. Enter a participant name before starting.\n"
+			"4. Press Start Recording to send participant, device name, and PC timestamp.\n"
+			"5. BLE turns off during SD logging to avoid timing drift.\n"
+			"6. Stop recording only by holding the TinZr side button for 3 seconds.\n\n"
+			"LED colors\n"
+			"Flashing Red: SD card not detected at the firmware reset time.\n"
+			"Red: standby, BLE available.\n"
+			"Blinking green/red: GUI connected, not recording.\n"
+			"Solid green: recording to SD.\n"
+			"Flashing red: startup/error state.\n\n"
+			"Battery\n"
+			"Battery is requested automatically when a TinZr connects and again at GUI start."
+		)
+		help_text.setWordWrap(True)
+		help_text.setTextFormat(QtCore.Qt.PlainText)
+		help_text.setStyleSheet("font-size: 9.5pt; color: #E3F2FD;")
+		help_layout.addWidget(help_text)
+		help_layout.addStretch(1)
+
+		self.tabs.addTab(self.tab_logger, "Logger")
+		self.tabs.addTab(self.tab_help, "Instructions")
+		main_layout.addWidget(self.tabs, 1)
+
+		self.btn_start_recording.setEnabled(False)
 		self._ui_enable_participant_controls(False)
 
 		footer = QtWidgets.QHBoxLayout()
@@ -1067,14 +1086,17 @@ class TinZrWearableSD(QtWidgets.QWidget):
 			self._log(f"Connected: {info['alias']}")
 
 			if self._any_connected():
-				self._invoke(self, "_ui_set_record_toggle", self.toggle_record.isChecked(), True)
+				self._invoke(self, "_ui_set_record_toggle", self._logging_armed, True)
 				self._invoke(self, "_ui_enable_participant_controls", True)
 				self._invoke(self, "_ui_enable_sd_retrieve", True)
 
 			await self._send_cmd_to_device(addr, CMD_BATT, response=False)
 
 			if self._logging_armed:
-				await self._arm_device_for_logging(addr)
+				self._logging_armed = False
+				self._invoke(self, "_ui_set_record_toggle", False, True)
+				self._invoke(self, "_ui_enable_participant_controls", True)
+				self._log(f"Reconnected: {info['alias']}. Recording state cleared for SD retrieval or a new run.")
 
 		except Exception as e:
 			self._log(f"Connect failed ({addr}): {e}")
@@ -1092,11 +1114,7 @@ class TinZrWearableSD(QtWidgets.QWidget):
 		client: BleakClient = info.get("client")
 
 		try:
-			if stop_logging_on_disconnect and client and client.is_connected:
-				try:
-					await client.write_gatt_char(TINZR_BLE_RX_CHAR_UUID, CMD_STOP, response=False)
-				except Exception:
-					pass
+			# This firmware is start-only over BLE. Recording stops only from the TinZr side button.
 
 			if client:
 				try:
@@ -1403,17 +1421,10 @@ class TinZrWearableSD(QtWidgets.QWidget):
 		self._invoke(self, "_ui_set_status", text)
 
 	# =========================
-	# Participant / Logging / Heartbeat
+	# Participant / Logging
 	# =========================
 	def _sanitize_subject(self, subject: str) -> str:
 		return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in subject)
-
-	def _build_experiment_meta_payload(self, device_alias: str) -> bytes:
-		subject = self._sanitize_subject(self.edit_participant.text().strip())
-		now = datetime.now()
-		stamp = now.strftime("%Y-%m-%dT%H:%M:%S.%f")
-		alias_ = self._sanitize_subject(device_alias or "TinZr")
-		return f"{CMD_EXP_META_PREFIX} sub-{subject}|device-{alias_}|{stamp}".encode("utf-8")
 
 	def on_set_participant(self):
 		name = self.edit_participant.text().strip()
@@ -1431,30 +1442,36 @@ class TinZrWearableSD(QtWidgets.QWidget):
 		await self._send_cmd_all(cmd)
 		self._log(f"Participant set: {safe}")
 
-	def on_record_toggled(self, checked: bool):
+	def on_start_recording_clicked(self):
 		if not self._any_connected():
 			self._log("No connected TinZr.")
-			self._invoke(self, "_ui_set_record_toggle", False, False)
+			self._invoke(self, "_ui_set_record_toggle", bool(self._logging_armed), False)
 			return
 
-		if checked:
-			self._run_coro(self._start_logging_all())
-		else:
-			self._run_coro(self._stop_logging_all())
+		if self._logging_armed:
+			self._log("Recording already started. Stop by holding the TinZr side button for 3 seconds.")
+			self._invoke(self, "_ui_set_record_toggle", True, False)
+			return
+
+		self._run_coro(self._start_logging_all())
 
 	async def _arm_device_for_logging(self, addr: str):
 		info = self.devices.get(addr)
 		if not info or not info.get("connected"):
 			return
 
-		name = self.edit_participant.text().strip()
-		if not name:
-			raise RuntimeError("Set participant before logging")
-
-		safe = self._sanitize_subject(name)
-		await self._send_cmd_to_device(addr, f"P:{safe}".encode("utf-8"), response=False)
+		self._expect_disconnect_after_start.add(addr)
+		subject = self._sanitize_subject(self.edit_participant.text().strip())
 		device_alias = info.get("alias") or info.get("ble_name") or "TinZr"
-		await self._send_cmd_to_device(addr, self._build_experiment_meta_payload(device_alias), response=False)
+		device_name = self._sanitize_subject(device_alias)
+		now_local = datetime.now().astimezone()
+		pc_timestamp = now_local.strftime("%Y-%m-%dT%H-%M-%S-") + f"{now_local.microsecond:06d}"
+		await self._send_cmd_to_device(addr, f"P:{subject}".encode("utf-8"), response=False)
+		await asyncio.sleep(0.05)
+		await self._send_cmd_to_device(addr, f"{CMD_DEVICE_PREFIX}{device_name}".encode("utf-8"), response=False)
+		await asyncio.sleep(0.05)
+		await self._send_cmd_to_device(addr, f"{CMD_TIME_PREFIX}{pc_timestamp}".encode("utf-8"), response=False)
+		await asyncio.sleep(0.05)
 		await self._send_cmd_to_device(addr, CMD_START, response=False)
 
 	async def _start_logging_all(self):
@@ -1478,12 +1495,10 @@ class TinZrWearableSD(QtWidgets.QWidget):
 				await asyncio.gather(*tasks)
 
 			self._logging_armed = True
-			if self.enable_heartbeats_during_logging:
-				self._log("Logging armed. Periodic PC sync anchors enabled.")
-				self._start_heartbeat_ui()
-			else:
-				self._stop_heartbeat_ui()
-				self._log("Logging armed. Devices are free-running on local time.")
+			self._invoke(self, "_ui_set_record_toggle", True, False)
+			self._invoke(self, "_ui_enable_participant_controls", False)
+			self._invoke(self, "_ui_enable_sd_retrieve", False)
+			self._log("Start command sent. BLE will disconnect and logging will continue on SD. Stop by holding the TinZr side button for 3 seconds.")
 
 		except Exception as e:
 			self._log(f"Start logging failed: {e}")
@@ -1491,32 +1506,7 @@ class TinZrWearableSD(QtWidgets.QWidget):
 			self._invoke(self, "_ui_set_record_toggle", False, True)
 
 	async def _stop_logging_all(self):
-		try:
-			self._stop_heartbeat_ui()
-			await self._send_cmd_all(CMD_STOP)
-		except Exception as e:
-			self._log(f"Stop logging failed: {e}")
-		finally:
-			self._logging_armed = False
-			self._log("Logging stopped.")
-
-	def _start_heartbeat_ui(self):
-		self._invoke(self, "_gui_start_heartbeat")
-
-	def _stop_heartbeat_ui(self):
-		self._invoke(self, "_gui_stop_heartbeat")
-
-	def _send_heartbeat_all(self):
-		if not self._any_connected() or not self._logging_armed or not self.enable_heartbeats_during_logging:
-			return
-
-		now = datetime.now()
-		stamp_print = now.strftime("%Y-%m-%d %H:%M:%S.%f")
-		stamp_tx = now.strftime("%Y-%m-%d_%H:%M:%S.%f")
-		cmd = f"T:{stamp_tx}".encode("utf-8")
-
-		self.label_hb.setText(f"Sync anchors: {stamp_print}")
-		self._run_coro(self._send_cmd_all(cmd))
+		self._log("Stop recording by holding the TinZr side button for 3 seconds.")
 
 	def _poll_battery_all(self):
 		if not self._any_connected():
@@ -1525,7 +1515,6 @@ class TinZrWearableSD(QtWidgets.QWidget):
 
 	def _stop_logging_ui_state(self):
 		self._logging_armed = False
-		self._stop_heartbeat_ui()
 		self._invoke(self, "_ui_set_record_toggle", False, False)
 		self._invoke(self, "_ui_enable_participant_controls", False)
 

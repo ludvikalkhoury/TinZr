@@ -1,108 +1,64 @@
 /*
  * ================================================================
- *  TinZr Wearable BLE Control with saving data to SD card 
+ *  TinZr Wearable SD Logger
  * ================================================================
  *
- * This Arduino sketch demonstrates the simplest possible usage of
- * the TinZrWearableSD module to enable high-rate data logging to
- * a microSD card on the TinZr platform. 
+ * This example records TinZr wearable sensor data directly to a
+ * microSD card. Holding the onboard push button for 3 seconds toggles
+ * recording on and off:
  *
- * The main control (stop/start) is done with a Python-based GUI
- * that communicates with the TinZr over BLE. 
+ *   - Red LED:    stopped / ready
+ *   - Green LED:  recording
  *
- * ---------------------------------------------------------------
- * Features
- * ---------------------------------------------------------------
- *  - Initializes the TinZr wearable SD logging subsystem
- *  - Configures device hostname and SD log directory
- *  - Supports high-rate periodic sampling (~250 Hz)
- *  - Automatically manages file creation and data flushing
- *  - Minimal user code required (begin + handle)
+ * BLE is used only as an optional remote start trigger while the device
+ * is idle. The GUI may send a device name and one PC timestamp before
+ * sending "S" or "START". These values are saved in the CSV header, and
+ * the subject, device name, and PC timestamp are included in the file
+ * name. After recording starts, BLE is stopped and cannot stop the
+ * recording. The only stop control is the onboard button.
  *
- * ---------------------------------------------------------------
- * Behavior
- * ---------------------------------------------------------------
- * 1. On startup:
- *    - TinZrWearableSD is initialized using a configuration struct
- *    - The SD card is mounted and validated
- *    - A logging directory is created if it does not already exist
- *    - A new log file is prepared using the device hostname and
- *      timestamp-based naming
- *
- * 2. Runtime operation:
- *    - TinZrWearableSD.handle() is called repeatedly in loop()
- *    - Internally:
- *        • Sensors are sampled at the configured interval
- *        • Data is periodically written to SD
- *        • File integrity and write timing are managed automatically
+ * Each recording is saved as a CSV file in the configured SD folder.
+ * GUI-started recordings use names like:
+ *   sub-001_device-TinZrBlue_2026-03-13T12-53-32-411123.csv
+ * Button-only recordings use sub-unknown.
  *
  * ---------------------------------------------------------------
- * Configuration Parameters
+ * Configuration
  * ---------------------------------------------------------------
- *  - hostname
- *      Logical device name used for file naming and identification
+ * sample_interval_ms
+ *   Sampling period in milliseconds.
+ *   The default value of 4 ms targets 250 Hz.
  *
- *  - sample_interval_ms
- *      Sampling period in milliseconds
- *      (4 ms ≈ 250 Hz effective sample rate)
+ * sd_log_dir
+ *   Directory on the SD card where CSV log files are saved.
+ *   The folder is created automatically if it does not exist.
  *
- *  - sd_log_dir
- *      Directory path on the SD card where log files are stored
- *
- * ---------------------------------------------------------------
- * System Timing
- * ---------------------------------------------------------------
- *  - Sampling and logging are driven by non-blocking timing logic
- *  - No delay is required in loop()
- *  - User code remains responsive and cooperative
+ * hostname
+ *   Default TinZr name used in CSV headers and file names. The GUI can
+ *   override this at the start command for GUI-started recordings.
  *
  * ---------------------------------------------------------------
- * Dependencies
+ * Logged Columns
  * ---------------------------------------------------------------
- * - TinZrWearableSD
- *     Provides:
- *       - SD card initialization and mounting
- *       - High-rate buffered data logging
- *       - Automatic file management
- *       - Non-blocking handle-based execution model
+ * t_ms, red_nA, ir_nA, ax_g, ay_g, az_g, gx_dps, gy_dps, gz_dps
  *
- * - Arduino Core
- *     Provides:
- *       - Main application structure (setup / loop)
- *       - Timing primitives
+ * The IMU is required. The MAX30102 PPG sensor is optional; if it is
+ * not detected, red_nA and ir_nA values are logged as zero. PPG values
+ * are approximate photodiode current in nanoamps. Accelerometer values
+ * are logged in g, and gyroscope values are logged in degrees per second.
  *
- * ---------------------------------------------------------------
- * Notes
- * ---------------------------------------------------------------
- * - This example intentionally contains no application logic
- * - All logging behavior is encapsulated within TinZrWearableSD
- * - Logged data persists across power cycles (SD-based storage)
- * - Ideal for:
- *     • Bring-up testing
- *     • Long-duration data acquisition
- *     • Wearable validation and field recording
- *
- * TinZr Platform SD Logging Example with Main Control over
- * BLE with a Python-based GUI
+ * Keep setup() and loop() small. The implementation lives in
+ * TinZrWearableSD.h / TinZrWearableSD.cpp so this file only exposes
+ * user-facing configuration.
  * ================================================================
  */
 
-
-// !!!!!!!!!!!!
-// !!!!NOTE!!!!
-// !!!!!!!!!!!!
-// Before you use this code, keep in mind that there could be of data drift and de-synchornization since different TinZr do not run at the same clock. 
-// If this is a limitation, then consider using TinZrWearable.ino instead (which sends data over BLE to a computer).
-
-
-#include <Arduino.h>
 #include "TinZrWearableSD.h"
 
 TinZrWearableSDConfig cfg = {
-	.hostname                         = "TinZr2", 
-	.sample_interval_ms               = 4,      // ≈ 250 Hz
-	.enable_pc_clock_drift_correction = true,
-	.sd_log_dir                       = "/TinZrLogs"
+	.sample_interval_ms = 4,      // 250 Hz
+	.sd_log_dir         = "/TinZrLogs",
+	.hostname           = "TinZrBlue"
 };
 
 void setup() {
