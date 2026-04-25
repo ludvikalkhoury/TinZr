@@ -7,123 +7,237 @@
 <style>
 :root{--bg:#020817;--panel:rgba(255,255,255,.04);--line:rgba(30,136,229,.08);--text:#e0e8ff;--muted:#a8b3cf;--strong:#e3f2fd;--field:#071529;--btn:#1565c0;--btn2:rgba(255,255,255,.08);--btnDis:#0b2340;--ok:#4caf50;--warn:#ffc107;--bad:#f44336}
 *{box-sizing:border-box}html,body{height:100%}body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI","Roboto",system-ui,sans-serif}
-.page{max-width:760px;margin:0 auto;padding:14px;display:grid;gap:12px}.card{background:var(--panel);border-radius:18px;padding:12px;box-shadow:0 0 0 1px var(--line) inset}.title{font-size:16pt;font-weight:600;color:var(--strong)}.sub,.meta,.footer,.status{font-size:9pt;color:var(--muted)}.controls{display:grid;grid-template-columns:96px 1fr 44px;gap:10px;align-items:center}.row2,.row3,.row4{grid-column:1/-1;display:grid;gap:10px;align-items:center}.row2{grid-template-columns:1fr auto}.row3{grid-template-columns:auto 1fr auto}.row4{grid-template-columns:1fr auto}
-button,input,select{height:46px;width:100%;border:none;border-radius:12px;font-size:11pt}button{background:var(--btn);color:#fff;font-weight:650;padding:0 14px;cursor:pointer}button:hover{filter:brightness(1.08)}button:disabled{background:var(--btnDis);color:#6f7a95;cursor:not-allowed}input,select{background:var(--field);color:var(--text);border:1px solid rgba(30,136,229,.9);padding:0 14px}input::placeholder{color:rgba(168,179,207,.65)}.icon{padding:0;font-size:18pt;font-weight:900;background:rgba(255,255,255,.06);color:var(--strong)}.secondary{background:var(--btn2)}.deviceList{display:grid;gap:8px;min-height:72px}.empty{font-size:9pt;color:var(--muted);padding:4px 0}.device{background:rgba(255,255,255,.02);border-radius:14px;padding:10px;display:grid;grid-template-columns:1fr auto auto auto;gap:10px;align-items:center}.alias{font-size:10pt;font-weight:600;color:var(--strong)}.addr{font:8pt ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.x{width:22px;height:22px;border-radius:8px;padding:0;background:transparent}.x:hover{background:rgba(255,255,255,.08)}
+.page{max-width:760px;margin:0 auto;padding:14px;display:grid;gap:12px}.card{background:var(--panel);border-radius:18px;padding:12px;box-shadow:0 0 0 1px var(--line) inset}.title{font-size:16pt;font-weight:600;color:var(--strong)}.sub,.meta,.footer,.status,.help{font-size:9pt;color:var(--muted)}.help{line-height:1.45}
+.controls{display:grid;grid-template-columns:96px 1fr 44px;gap:10px;align-items:center}.row2,.row3,.row4{grid-column:1/-1;display:grid;gap:10px;align-items:center}.row2{grid-template-columns:1fr auto}.row3{grid-template-columns:auto 1fr auto}.row4{grid-template-columns:1fr auto}
+button,input,select{height:46px;width:100%;border:none;border-radius:12px;font-size:11pt}button{background:var(--btn);color:#fff;font-weight:650;padding:0 14px;cursor:pointer}button:hover{filter:brightness(1.08)}button:disabled{background:var(--btnDis);color:#6f7a95;cursor:not-allowed}input,select{background:var(--field);color:var(--text);border:1px solid rgba(30,136,229,.9);padding:0 14px}input::placeholder{color:rgba(168,179,207,.65)}.icon{padding:0;font-size:18pt;font-weight:900;background:rgba(255,255,255,.06);color:var(--strong)}.secondary{background:var(--btn2)}
+.deviceList{display:grid;gap:8px;min-height:72px}.empty{font-size:9pt;color:var(--muted);padding:4px 0}.device{background:rgba(255,255,255,.02);border-radius:14px;padding:10px;display:grid;grid-template-columns:1fr auto auto auto;gap:10px;align-items:center}.alias{font-size:10pt;font-weight:600;color:var(--strong)}.addr{font:8pt ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.x{width:22px;height:22px;border-radius:8px;padding:0;background:transparent}.x:hover{background:rgba(255,255,255,.08)}
 .switchRow{display:flex;align-items:center;gap:8px}.switch{position:relative;width:45px;height:25px;border-radius:999px;background:#6e6e78;cursor:pointer;flex:0 0 auto}.switch.on{background:var(--ok)}.switch.dis{opacity:.5;cursor:not-allowed}.thumb{position:absolute;top:3px;left:3px;width:19px;height:19px;border-radius:50%;background:#f0f0f0;transition:transform .12s ease}.switch.on .thumb{transform:translateX(20px)}
 .battery{position:relative;width:62px;height:30px;cursor:pointer}.body{position:absolute;left:3px;top:3px;width:calc(100% - 9px);height:calc(100% - 6px);background:var(--bg);border:1.5px solid var(--text);border-radius:7px;overflow:hidden}.fill{position:absolute;left:1.5px;top:1.5px;height:calc(100% - 3px);width:0%;border-radius:5px;background:#111827}.term{position:absolute;right:0;top:10px;width:7px;height:10px;background:var(--bg);border:1.2px solid var(--text);border-radius:2px}.pct{position:absolute;left:3px;top:3px;width:calc(100% - 9px);height:calc(100% - 6px);display:flex;align-items:center;justify-content:center;font-size:12pt;font-weight:800}
-.modalBg{position:fixed;inset:0;background:rgba(2,8,23,.72);backdrop-filter:blur(8px);display:none;align-items:center;justify-content:center;padding:16px}.modalBg.open{display:flex}.modal{width:min(560px,100%);background:#071529;border-radius:20px;padding:14px;display:grid;gap:10px}.top,.actions{display:grid;gap:8px;align-items:center}.top{grid-template-columns:auto 1fr auto}.actions{grid-template-columns:auto auto 1fr auto}.files{min-height:180px;max-height:260px;overflow:auto;padding:8px;border-radius:12px;background:rgba(255,255,255,.05);display:grid;gap:6px}.file{display:flex;align-items:center;gap:8px;font-size:10pt}.prog{height:15px;border-radius:4px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.25);overflow:hidden}.bar{height:100%;width:0%;background:var(--ok)}.log{min-height:110px;max-height:160px;overflow:auto;padding:10px 12px;border-radius:12px;background:rgba(255,255,255,.05);font:9pt ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#b8c3e0;white-space:pre-wrap}
-@media (max-width:640px){.controls,.row2,.row3,.row4,.top,.actions{grid-template-columns:1fr}.device{grid-template-columns:1fr auto auto}.device > :first-child{grid-column:1/-1}}
+@media (max-width:640px){.controls,.row2,.row3,.row4{grid-template-columns:1fr}.device{grid-template-columns:1fr auto auto}.device>:first-child{grid-column:1/-1}}
 </style>
 </head>
 <body>
 <div class="page">
-<div class="card"><div class="title">TinZr Wearable SD</div><div class="sub">Multi-device &#8226; PC-timestamp SD logging</div></div>
+<div class="card"><div class="title">TinZr Wearable SD</div><div class="sub">Multi-device - autonomous local-time SD logging</div></div>
 <div class="card"><div class="controls">
 <button id="scan">Scan</button>
 <select id="scanList"><option value="">No scanned TinZr selected</option></select>
 <button id="add" class="icon" title="Add selected TinZr">+</button>
 <div class="row2">
 <div class="switchRow"><div>SD Log (All)</div><div id="globalSw" class="switch dis"><div class="thumb"></div></div></div>
-<button id="retrieve" class="secondary" disabled>Retrieve from SD</button>
 </div>
 <div class="row3"><div>Participant</div><input id="participant" placeholder="e.g., test001" disabled><button id="setParticipant" disabled>Set</button></div>
-<div class="row4"><div id="status" class="status">Status: Idle</div><div id="hb" class="status">Sync. trigger: -</div></div>
+<div class="row4"><div id="status" class="status">Status: Idle</div><div id="loggingState" class="status">Recording: Off</div></div>
 </div></div>
 <div class="card"><div class="meta" style="margin-bottom:8px;color:var(--strong)">Added TinZrs</div><div id="devices" class="deviceList"><div class="empty">No TinZrs added.</div></div></div>
+<div class="card"><div class="help">Keep TinZrs close to the host. Pair them first, then scan and connect here. Start sends participant, alias, and one PC timestamp. After start, BLE is expected to disconnect while the device records to SD. Stop recording only by holding the TinZr side button for 3 seconds.</div></div>
 <div class="footer">V1.0.0</div>
 </div>
 
-<div id="modalBg" class="modalBg">
-<div class="modal">
-<div class="top"><div>TinZr:</div><select id="sdSelect"></select><button id="sdRefresh">Refresh</button></div>
-<div id="fileList" class="files"><div class="empty">No files.</div></div>
-<div class="actions"><button id="selAll" class="secondary">Select all</button><button id="selNone" class="secondary">Clear</button><div class="prog"><div id="bar" class="bar"></div></div><button id="download" disabled>Download selected -&gt; PC</button></div>
-<div id="sdLog" class="log"></div>
-<button id="closeModal" class="secondary">Close</button>
-</div>
-</div>
-
 <script>
-const UUID_S="4fafc201-1fb5-459e-8fcc-c5c9c331914b",UUID_RX="beb5483e-36e1-4688-b7f5-ea07361b26a8",UUID_TX="beb5483e-36e1-4688-b7f5-ea07361b26a9",PREFIX="TinZr",CMD_START="S",CMD_STOP="E",CMD_BATT="BAT",CMD_SD_LS="LS",HB_S=1;
-let scanId=1,devId=1,logging=false,hbTimer=null,modalId="";
+const UUID_S="4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+const UUID_RX="beb5483e-36e1-4688-b7f5-ea07361b26a8";
+const UUID_TX="beb5483e-36e1-4688-b7f5-ea07361b26a9";
+const PREFIX="TinZr";
+const CMD_START="S";
+const CMD_BATT="BAT";
+const CMD_TIME_PREFIX="T:";
+const CMD_DEVICE_PREFIX="D:";
+const BATT_POLL_MS=10*60*1000;
+
+let scanId=1,devId=1,battTimer=null;
 const scanned=[],devices=[];
+
 const $=id=>document.getElementById(id);
-const el={scan:$("scan"),scanList:$("scanList"),add:$("add"),globalSw:$("globalSw"),retrieve:$("retrieve"),participant:$("participant"),setParticipant:$("setParticipant"),status:$("status"),hb:$("hb"),devices:$("devices"),modalBg:$("modalBg"),sdSelect:$("sdSelect"),sdRefresh:$("sdRefresh"),fileList:$("fileList"),bar:$("bar"),selAll:$("selAll"),selNone:$("selNone"),download:$("download"),sdLog:$("sdLog"),closeModal:$("closeModal")};
+const el={scan:$("scan"),scanList:$("scanList"),add:$("add"),globalSw:$("globalSw"),participant:$("participant"),setParticipant:$("setParticipant"),status:$("status"),loggingState:$("loggingState"),devices:$("devices")};
+
 const bleOK=()=>!!(navigator.bluetooth&&navigator.bluetooth.requestDevice);
 const enc=s=>new TextEncoder().encode(s);
+const dec=b=>new TextDecoder().decode(b);
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const pad=(n,w=2)=>String(n).padStart(w,"0");
-function micros(d){return `${pad(d.getMilliseconds(),3)}000`}
-function metaTs(){const d=new Date();return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${micros(d)}`}
-function hbTxTs(){const d=new Date();return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}_${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${micros(d)}`}
-function printTs(){const d=new Date();return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${micros(d)}`}
+function tsCompact(){const d=new Date();return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}-${pad(d.getMilliseconds(),3)}000`}
 function safeName(s){return String(s||"").trim().split("").map(ch=>/[A-Za-z0-9_-]/.test(ch)?ch:"_").join("")}
 function status(s){el.status.textContent=`Status: ${s}`}
-function hb(s){el.hb.textContent=`Sync. trigger: ${s}`}
+function setRecordingLabel(on){el.loggingState.textContent=`Recording: ${on?"Armed":"Off"}`}
 function anyConnected(){return devices.some(d=>d.connected)}
 function connected(){return devices.filter(d=>d.connected)}
+function anyLoggingArmed(){return devices.some(d=>d.loggingArmed)}
 function setSw(node,on){node.classList.toggle("on",!!on)}
 function setSwDis(node,dis){node.classList.toggle("dis",!!dis)}
 function setBatt(pctEl,fillEl,pct){if(pct==null||Number.isNaN(pct)){pctEl.textContent="--";fillEl.style.width="0%";fillEl.style.background="#111827";return}pct=Math.max(0,Math.min(100,Math.floor(pct)));pctEl.textContent=String(pct);fillEl.style.width=`${pct}%`;fillEl.style.background=pct>=60?"#4caf50":pct>=30?"#ffc107":"#f44336"}
-function refreshControls(){const on=anyConnected();el.participant.disabled=!on;el.setParticipant.disabled=!on;el.retrieve.disabled=!on;setSwDis(el.globalSw,!on);setSw(el.globalSw,logging);if(!on)hb("-")}
+function updateGlobalState(){const connectedNow=anyConnected(),loggingNow=anyLoggingArmed();el.participant.disabled=!connectedNow||loggingNow;el.setParticipant.disabled=!connectedNow||loggingNow;setSwDis(el.globalSw,!connectedNow||loggingNow);setSw(el.globalSw,loggingNow);setRecordingLabel(loggingNow);if(!connectedNow&&!loggingNow)status("Idle")}
 function refreshScanList(){el.scanList.innerHTML="";if(!scanned.length){el.scanList.innerHTML='<option value="">No scanned TinZr selected</option>';el.add.disabled=true;return}for(const s of scanned){const o=document.createElement("option");o.value=s.id;o.textContent=s.label;el.scanList.appendChild(o)}el.scanList.value=scanned[scanned.length-1].id;el.add.disabled=false}
 function renderDevices(){el.devices.innerHTML="";if(!devices.length){el.devices.innerHTML='<div class="empty">No TinZrs added.</div>';return}for(const d of devices)el.devices.appendChild(d.card)}
-function writeLog(line){if(!line)return;el.sdLog.textContent=el.sdLog.textContent?`${el.sdLog.textContent}\n${line}`:line;el.sdLog.scrollTop=el.sdLog.scrollHeight}
-function setBar(p){el.bar.style.width=`${Math.max(0,Math.min(100,Number(p)||0))}%`}
-function modalDevice(){return connected().find(d=>String(d.id)===modalId)||null}
-function renderModalFiles(d){el.fileList.innerHTML="";if(!d||!d.files.length){el.fileList.innerHTML=`<div class="empty">${d?"No files.":"No connected TinZrs."}</div>`;el.download.disabled=true;return}for(const f of d.files){const row=document.createElement("label");row.className="file";const c=document.createElement("input");c.type="checkbox";c.checked=d.selected.has(f);c.onchange=()=>{c.checked?d.selected.add(f):d.selected.delete(f);el.download.disabled=d.selected.size===0};const t=document.createElement("span");t.textContent=f;row.append(c,t);el.fileList.appendChild(row)}el.download.disabled=d.selected.size===0}
-function syncModalSelect(){el.sdSelect.innerHTML="";const list=connected();if(!list.length){modalId="";renderModalFiles(null);return}if(!list.some(d=>String(d.id)===modalId))modalId=String(list[0].id);for(const d of list){const o=document.createElement("option");o.value=d.id;o.textContent=d.alias;el.sdSelect.appendChild(o)}el.sdSelect.value=modalId;renderModalFiles(modalDevice())}
-function openModal(){modalId=connected()[0]?String(connected()[0].id):"";el.sdLog.textContent="";setBar(0);syncModalSelect();el.modalBg.classList.add("open")}
-function closeModal(){el.modalBg.classList.remove("open")}
-function mkDevice(scan){const d={id:devId++,device:scan.device,alias:scan.device.name||scan.label,connected:false,connecting:false,server:null,rx:null,tx:null,notify:null,buf:"",ls:false,files:[],selected:new Set()};
-const card=document.createElement("div");card.className="device";
-const left=document.createElement("div"),alias=document.createElement("div"),addr=document.createElement("div");alias.className="alias";addr.className="addr";alias.textContent=d.alias;addr.textContent=`${d.device.name||"TinZr"} [${d.device.id||"web-bluetooth"}]`;left.append(alias,addr);
-const batt=document.createElement("div");batt.className="battery";batt.innerHTML='<div class="body"><div class="fill"></div></div><div class="term"></div><div class="pct">--</div>';
-const swWrap=document.createElement("div");swWrap.className="switchRow";swWrap.innerHTML='<div>Connect</div>';const sw=document.createElement("div");sw.className="switch";sw.innerHTML='<div class="thumb"></div>';swWrap.appendChild(sw);
-const x=document.createElement("button");x.className="x";x.textContent="x";
-card.append(left,batt,swWrap,x);d.card=card;d.aliasEl=alias;d.fill=batt.querySelector(".fill");d.pct=batt.querySelector(".pct");d.sw=sw;
-batt.onclick=async()=>{if(d.connected)await safeWriteText(d,CMD_BATT)};
-sw.onclick=async()=>{if(d.connecting||sw.classList.contains("dis"))return;d.connected?await disconnect(d,true,false):await connect(d)};
-x.onclick=async()=>{await removeDevice(d)};
-return d}
+function formatAddr(d){return `${d.device.name||"TinZr"} [${d.device.id||"web-bluetooth"}]`}
+function mkDevice(scan){
+ const d={id:devId++,device:scan.device,alias:scan.device.name||scan.label,connected:false,connecting:false,loggingArmed:false,expectDisconnectAfterStart:false,server:null,rx:null,tx:null,notify:null,discHandler:null,buf:"",battPollAt:0};
+ const card=document.createElement("div");card.className="device";
+ const left=document.createElement("div"),alias=document.createElement("div"),addr=document.createElement("div");alias.className="alias";addr.className="addr";alias.textContent=d.alias;addr.textContent=formatAddr(d);left.append(alias,addr);
+ const batt=document.createElement("div");batt.className="battery";batt.innerHTML='<div class="body"><div class="fill"></div></div><div class="term"></div><div class="pct">--</div>';
+ const swWrap=document.createElement("div");swWrap.className="switchRow";swWrap.innerHTML='<div>Connect</div>';const sw=document.createElement("div");sw.className="switch";sw.innerHTML='<div class="thumb"></div>';swWrap.appendChild(sw);
+ const x=document.createElement("button");x.className="x";x.textContent="x";
+ card.append(left,batt,swWrap,x);d.card=card;d.aliasEl=alias;d.addrEl=addr;d.fill=batt.querySelector(".fill");d.pct=batt.querySelector(".pct");d.sw=sw;
+ batt.onclick=async()=>{if(d.connected)await safeWriteText(d,CMD_BATT)};
+ sw.onclick=async()=>{if(d.connecting||sw.classList.contains("dis"))return;d.connected?await disconnect(d,true,false):await connect(d)};
+ x.onclick=async()=>{await removeDevice(d)};
+ return d
+}
+
 async function writeBytes(d,b){if(!d.rx)throw new Error("Not connected");await d.rx.writeValue(b)}
 async function writeText(d,s){await writeBytes(d,enc(s))}
-async function safeWriteText(d,s){try{await writeText(d,s);return true}catch{status(`[${d.alias}] BLE write failed -> disconnecting`);await disconnect(d,false,true);return false}}
-async function safeWriteBytes(d,b){try{await writeBytes(d,b);return true}catch{status(`[${d.alias}] BLE write failed -> disconnecting`);await disconnect(d,false,true);return false}}
-async function sendAllText(s){for(const d of devices)if(d.connected)await safeWriteText(d,s)}
-async function sendAllBytes(b){for(const d of devices)if(d.connected)await safeWriteBytes(d,b)}
-function expMeta(alias){return `X: sub-${safeName(el.participant.value)}|device-${safeName(alias||"TinZr")}|${metaTs()}`}
+async function safeWriteBytes(d,b){try{await writeBytes(d,b);return true}catch(e){await handleBleDrop(d,`send exception: ${e?.message||e}`);return false}}
+async function safeWriteText(d,s){return safeWriteBytes(d,enc(s))}
+async function mustWriteBytes(d,b){if(!(await safeWriteBytes(d,b)))throw new Error(`BLE write failed for ${d.alias}`)}
+async function mustWriteText(d,s){if(!(await safeWriteText(d,s)))throw new Error(`BLE write failed for ${d.alias}`)}
+async function sendAllText(s){for(const d of connected())await safeWriteText(d,s)}
+
+async function handleBleDrop(d,why="BLE dropped"){
+ const expected=d.expectDisconnectAfterStart===true;
+ d.connected=false;d.connecting=false;d.server=null;d.rx=null;d.tx=null;d.buf="";
+ try{if(d.device?.gatt?.connected)d.device.gatt.disconnect()}catch{}
+ setBatt(d.pct,d.fill,null);setSw(d.sw,false);d.sw.classList.remove("dis");
+ if(expected){
+  d.expectDisconnectAfterStart=false;
+  d.loggingArmed=true;
+  status(`Recording started on ${d.alias}. BLE disconnected as expected. Stop by holding the TinZr side button for 3 seconds.`);
+ }else{
+  d.loggingArmed=false;
+  status(`Disconnected (${why}): ${d.alias}${anyConnected()?"":"."}`);
+ }
+ updateGlobalState();
+}
+
+async function connect(d){
+ if(d.connecting||!d.device)return;
+ d.connecting=true;d.sw.classList.add("dis");status(`[${d.alias}] Connecting...`);
+ const onDisc=async()=>{d.device.removeEventListener("gattserverdisconnected",onDisc);await handleBleDrop(d,"BLE dropped")};
+ d.discHandler=onDisc;
+ try{
+  d.device.addEventListener("gattserverdisconnected",onDisc);
+  d.server=await d.device.gatt.connect();
+  const svc=await d.server.getPrimaryService(UUID_S);
+  d.rx=await svc.getCharacteristic(UUID_RX);
+  d.tx=await svc.getCharacteristic(UUID_TX);
+  d.notify=notifyHandler(d);
+  await d.tx.startNotifications();
+  d.tx.addEventListener("characteristicvaluechanged",d.notify);
+  d.connected=true;d.expectDisconnectAfterStart=false;d.loggingArmed=false;
+  setSw(d.sw,true);
+  status(`Connected: ${d.alias}`);
+  await safeWriteText(d,CMD_BATT);
+ }catch(e){
+  status(`Connect failed: ${e?.message||e}`);
+  try{if(d.discHandler)d.device.removeEventListener("gattserverdisconnected",d.discHandler)}catch{}
+  d.connected=false;d.server=null;d.rx=null;d.tx=null;setSw(d.sw,false);
+ }finally{
+  d.connecting=false;d.sw.classList.remove("dis");updateGlobalState();
+ }
+}
+
+async function disconnect(d,clicked=false,fromGatt=false){
+ try{if(d.tx&&d.notify){try{d.tx.removeEventListener("characteristicvaluechanged",d.notify);await d.tx.stopNotifications()}catch{}}}catch{}
+ try{if(d.discHandler)d.device.removeEventListener("gattserverdisconnected",d.discHandler)}catch{}
+ try{if(!fromGatt&&d.device?.gatt?.connected)d.device.gatt.disconnect()}catch{}
+ d.connected=false;d.connecting=false;d.loggingArmed=false;d.expectDisconnectAfterStart=false;d.server=null;d.rx=null;d.tx=null;d.buf="";
+ setBatt(d.pct,d.fill,null);setSw(d.sw,false);
+ if(clicked)status(`Disconnected: ${d.alias}`);
+ updateGlobalState();
+}
+
+async function removeDevice(d){
+ try{if(d.connected)await disconnect(d,false,false)}catch{}
+ const i=devices.indexOf(d);if(i>=0)devices.splice(i,1);
+ renderDevices();updateGlobalState();
+}
+
 function onLine(d,line){
  if(!line)return;
- if(line.startsWith("LS:BEGIN")){d.ls=true;d.files=[];d.selected.clear();if(modalDevice()===d){writeLog("Listing files...");renderModalFiles(d)}return}
- if(d.ls&&(line.startsWith("LS:END")||line.startsWith("LS: sent files ="))){d.ls=false;status(`[${d.alias}] LS complete`);if(modalDevice()===d){writeLog(`Found ${d.files.length} file(s).`);renderModalFiles(d)}return}
- if(d.ls&&line.startsWith("LS:")){const payload=line.split(":",2)[1]?.trim()||"";if(payload){d.files.push(payload);if(modalDevice()===d)renderModalFiles(d)}return}
- if(line.startsWith("BAT:")){const pct=parseInt(line.split(":")[1].replace("%","").trim(),10);if(!Number.isNaN(pct))setBatt(d.pct,d.fill,pct);status(`[${d.alias}] ${line}`);return}
- if(modalDevice()===d)writeLog(line);status(`[${d.alias}] ${line}`)
+ if(line.startsWith("BAT:")){const pct=parseInt(line.split(":")[1].replace("%","").trim(),10);if(!Number.isNaN(pct)&&pct>=0&&pct<=100){setBatt(d.pct,d.fill,pct);status(`[${d.alias}] ${line}`)}return}
+ status(`[${d.alias}] ${line}`);
 }
-function notifyHandler(d){return e=>{d.buf+=new TextDecoder().decode(e.target.value);d.buf=d.buf.replace(/\r/g,"");let i;while((i=d.buf.indexOf("\n"))>=0){const line=d.buf.slice(0,i).trim();d.buf=d.buf.slice(i+1);if(line)onLine(d,line)}const t=d.buf.trim();if(t.startsWith("BAT:")&&/^\s*BAT:\s*\d+%?\s*$/.test(t)){d.buf="";onLine(d,t)}}}
-async function arm(d){const p=el.participant.value.trim();if(!p)throw new Error("Set participant before logging");if(!(await safeWriteText(d,`P:${safeName(p)}`)))throw new Error("Failed P:");if(!(await safeWriteText(d,expMeta(d.alias))))throw new Error("Failed X:");if(!(await safeWriteBytes(d,new Uint8Array([CMD_START.charCodeAt(0)]))))throw new Error("Failed START")}
-function startHb(){stopHb();hbTimer=setInterval(async()=>{if(!logging||!anyConnected())return;hb(printTs());await sendAllText(`T:${hbTxTs()}`)},Math.floor(HB_S*1000));hb(printTs());sendAllText(`T:${hbTxTs()}`)}
-function stopHb(){if(hbTimer){clearInterval(hbTimer);hbTimer=null}hb("-")}
-async function startLogging(){if(!anyConnected()){logging=false;refreshControls();status("No connected TinZr.");return}if(!el.participant.value.trim()){logging=false;refreshControls();status("Set participant before logging.");return}try{for(const d of devices)if(d.connected)await arm(d);logging=true;refreshControls();status("Logging armed. PC timestamps every 1s.");startHb()}catch(e){logging=false;refreshControls();stopHb();status(`Start logging failed: ${e}`)}}
-async function stopLogging(){try{stopHb();await sendAllBytes(new Uint8Array([CMD_STOP.charCodeAt(0)]))}catch(e){status(`Stop logging failed: ${e}`)}finally{logging=false;refreshControls();status("Logging stopped.")}}
-async function handleBleDrop(d){
- if(logging){
-  try{await sendAllBytes(new Uint8Array([CMD_STOP.charCodeAt(0)]))}catch{}
-  logging=false;
-  stopHb();
-  refreshControls();
+
+function notifyHandler(d){
+ return async e=>{
+  const view=e.target.value;
+  const raw=new Uint8Array(view.buffer.slice(view.byteOffset,view.byteOffset+view.byteLength));
+  d.buf+=dec(raw);d.buf=d.buf.replace(/\r/g,"");let i;
+  while((i=d.buf.indexOf("\n"))>=0){const line=d.buf.slice(0,i).trim();d.buf=d.buf.slice(i+1);if(line)onLine(d,line)}
+  const t=d.buf.trim();if(t.startsWith("BAT:")&&/^\s*BAT:\s*\d+%?\s*$/.test(t)){d.buf="";onLine(d,t)}
  }
- await disconnect(d,false,true);
- status(`[${d.alias}] BLE dropped; logging stopped.`);
 }
-async function connect(d){if(d.connecting||!d.device)return;d.connecting=true;d.sw.classList.add("dis");status(`[${d.alias}] Connecting...`);if(d.discHandler)try{d.device.removeEventListener("gattserverdisconnected",d.discHandler)}catch{}d.discHandler=async()=>{await handleBleDrop(d)};try{d.device.addEventListener("gattserverdisconnected",d.discHandler);d.server=await d.device.gatt.connect();const svc=await d.server.getPrimaryService(UUID_S);d.rx=await svc.getCharacteristic(UUID_RX);d.tx=await svc.getCharacteristic(UUID_TX);d.notify=notifyHandler(d);await d.tx.startNotifications();d.tx.addEventListener("characteristicvaluechanged",d.notify);d.connected=true;setSw(d.sw,true);refreshControls();syncModalSelect();status(`[${d.alias}] Connected`);await safeWriteText(d,CMD_BATT);if(logging)try{await arm(d);status(`[${d.alias}] Joined global logging`)}catch(e){status(`[${d.alias}] Could not join logging: ${e}`)}}catch{status("Connect failed");await disconnect(d,false,true)}finally{d.connecting=false;d.sw.classList.remove("dis")}}
-async function disconnect(d,clicked=false,fromGatt=false){const was=d.connected;if(logging&&was)await safeWriteBytes(d,new Uint8Array([CMD_STOP.charCodeAt(0)]));try{if(d.tx&&d.notify){try{d.tx.removeEventListener("characteristicvaluechanged",d.notify);await d.tx.stopNotifications()}catch{}}}catch{}try{if(d.discHandler)try{d.device.removeEventListener("gattserverdisconnected",d.discHandler)}catch{};if(!fromGatt&&d.device?.gatt?.connected)d.device.gatt.disconnect()}catch{}d.connected=false;d.server=null;d.rx=null;d.tx=null;d.buf="";d.ls=false;d.files=[];d.selected.clear();setBatt(d.pct,d.fill,null);setSw(d.sw,false);if(logging&&!anyConnected())await stopLogging();refreshControls();syncModalSelect();if(clicked)status(`[${d.alias}] Disconnected`)}
-async function removeDevice(d){try{if(d.connected)await disconnect(d,false,false)}catch{}const i=devices.indexOf(d);if(i>=0)devices.splice(i,1);renderDevices();refreshControls();syncModalSelect();if(!anyConnected()&&logging)await stopLogging()}
-async function scan(){if(!bleOK()){status("Web Bluetooth not available. Use Bluefy (iOS) or a WebBLE browser.");return}el.scan.disabled=true;try{status("Scanning for TinZr devices...");const device=await navigator.bluetooth.requestDevice({filters:[{namePrefix:PREFIX}],optionalServices:[UUID_S]});let found=scanned.find(s=>s.device.id===device.id);if(found){found.device=device;found.label=device.name||found.label}else{scanned.push({id:String(scanId++),device,label:device.name||`TinZr ${scanId-1}`})}refreshScanList();status(`Scanned: ${device.name||"TinZr"}`)}catch{status("Device picker cancelled")}finally{el.scan.disabled=false}}
-async function add(){const s=scanned.find(x=>x.id===el.scanList.value);if(!s){status("Scan for a TinZr first.");return}if(devices.some(d=>d.device.id===s.device.id)){status("That TinZr is already added.");return}const base=s.device.name||"TinZr";const alias=(window.prompt("Alias name for this TinZr:",base)||"").trim()||base;const d=mkDevice(s);d.alias=alias;d.aliasEl.textContent=alias;devices.push(d);renderDevices();refreshControls();status(`Added: ${alias}`)}
-async function sdList(d){d.ls=false;d.files=[];d.selected.clear();renderModalFiles(d);writeLog(`[${d.alias}] Listing files...`);status(`[${d.alias}] Listing files...`);await safeWriteText(d,CMD_SD_LS)}
-el.scan.onclick=scan;el.add.onclick=add;el.globalSw.onclick=async()=>{if(el.globalSw.classList.contains("dis"))return;logging?await stopLogging():await startLogging()};el.setParticipant.onclick=async()=>{const p=el.participant.value.trim();if(!p){status("Participant is empty.");return}const safe=safeName(p);status(`Participant set: ${safe}`);if(anyConnected())await sendAllText(`P:${safe}`)};el.retrieve.onclick=()=>{if(anyConnected())openModal()};el.sdSelect.onchange=()=>{modalId=el.sdSelect.value;renderModalFiles(modalDevice())};el.sdRefresh.onclick=async()=>{const d=modalDevice();if(d)await sdList(d)};el.selAll.onclick=()=>{const d=modalDevice();if(!d)return;d.selected=new Set(d.files);renderModalFiles(d)};el.selNone.onclick=()=>{const d=modalDevice();if(!d)return;d.selected.clear();renderModalFiles(d)};el.download.onclick=()=>{const d=modalDevice();if(!d||!d.selected.size)return;writeLog("Download selected -> PC is not implemented in the Web Bluetooth page yet.");setBar(0)};el.closeModal.onclick=closeModal;el.modalBg.onclick=e=>{if(e.target===el.modalBg)closeModal()};
-refreshScanList();renderDevices();refreshControls();if(!bleOK()){status("Web Bluetooth not available. Use Bluefy (iOS) or a WebBLE browser.");el.scan.disabled=true;el.add.disabled=true}
+
+async function scan(){
+ if(!bleOK()){status("Web Bluetooth not available. Use Bluefy on iOS or a WebBLE-capable browser.");return}
+ el.scan.disabled=true;
+ try{
+  status("Scanning for TinZr devices...");
+  const device=await navigator.bluetooth.requestDevice({filters:[{namePrefix:PREFIX}],optionalServices:[UUID_S]});
+  let found=scanned.find(s=>s.device.id===device.id);
+  if(found){found.device=device;found.label=device.name||found.label}else scanned.push({id:String(scanId++),device,label:device.name||`TinZr ${scanId-1}`});
+  refreshScanList();
+  status(`Scanned: ${device.name||"TinZr"}`);
+ }catch{
+  status("Device picker cancelled");
+ }finally{
+  el.scan.disabled=false;
+ }
+}
+
+async function add(){
+ const s=scanned.find(x=>x.id===el.scanList.value);
+ if(!s){status("Scan for a TinZr first.");return}
+ if(devices.some(d=>d.device.id===s.device.id)){status("That TinZr is already added.");return}
+ const base=s.device.name||"TinZr";
+ const alias=(window.prompt("Alias name for this TinZr:",base)||"").trim()||base;
+ const d=mkDevice(s);d.alias=alias;d.aliasEl.textContent=alias;devices.push(d);
+ renderDevices();updateGlobalState();status(`Added: ${alias}`);
+}
+
+async function setParticipant(){
+ const p=el.participant.value.trim();
+ if(!p){status("Participant name is empty.");return}
+ if(!anyConnected()){status("No connected TinZr.");return}
+ const safe=safeName(p);
+ await sendAllText(`P:${safe}`);
+ status(`Participant set: ${safe}`);
+}
+
+async function startLogging(){
+ if(!anyConnected()){status("No connected TinZr.");return}
+ if(anyLoggingArmed()){status("Recording already started. Stop by holding the TinZr side button for 3 seconds.");return}
+ const subject=safeName(el.participant.value.trim());
+ if(!subject){status("Set participant before logging.");return}
+ try{
+  for(const d of connected()){
+   d.expectDisconnectAfterStart=true;
+   await mustWriteText(d,`P:${subject}`);await sleep(50);
+   await mustWriteText(d,`${CMD_DEVICE_PREFIX}${safeName(d.alias||"TinZr")}`);await sleep(50);
+   await mustWriteText(d,`${CMD_TIME_PREFIX}${tsCompact()}`);await sleep(50);
+   await mustWriteBytes(d,new Uint8Array([CMD_START.charCodeAt(0)]));
+  }
+  status("Start command sent. BLE will disconnect and logging will continue on SD. Stop by holding the TinZr side button for 3 seconds.");
+  updateGlobalState();
+ }catch(e){
+  for(const d of devices)d.expectDisconnectAfterStart=false;
+  status(`Start logging failed: ${e?.message||e}`);
+  updateGlobalState();
+ }
+}
+
+async function pollBatteryAll(){for(const d of connected())await safeWriteText(d,CMD_BATT)}
+function ensureBatteryTimer(){if(battTimer)clearInterval(battTimer);battTimer=setInterval(()=>{if(anyConnected())pollBatteryAll().catch(()=>{})},BATT_POLL_MS)}
+
+el.scan.onclick=scan;
+el.add.onclick=add;
+el.globalSw.onclick=async()=>{if(el.globalSw.classList.contains("dis"))return;await startLogging()};
+el.setParticipant.onclick=setParticipant;
+
+refreshScanList();
+renderDevices();
+updateGlobalState();
+ensureBatteryTimer();
+if(!bleOK()){status("Web Bluetooth not available. Use Bluefy on iOS or a WebBLE-capable browser.");el.scan.disabled=true;el.add.disabled=true}
 </script>
 </body>
 </html>
