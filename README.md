@@ -51,7 +51,7 @@ In Arduino IDE:
 ### 4️⃣ Select your board
 Go to:
 
-**Tools → Board → TinZr Boards → TinZr ESP32-C3 Rev4**
+**Tools → Board → TinZr Boards → TinZr ESP32-C3 Rev5**
 
 
 ### 5️⃣ Install `TinZrConnect` as a Zipped Arduino Library
