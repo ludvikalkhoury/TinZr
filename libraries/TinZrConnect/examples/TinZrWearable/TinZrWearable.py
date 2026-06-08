@@ -2013,10 +2013,10 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 		self.record_next_sample_idx = None
 		self.rec_devices_order = []
 		self.rec_alias_map = {}
-		skipped = self.record_skip_count
+		nan_filled = self.record_skip_count
 		self.record_skip_count = 0
 		self.btn_plot.setEnabled(True)
-		self.status_update.emit(f"Recording stopped. Skipped sync rows: {skipped}")
+		self.status_update.emit(f"Recording stopped. NaN-filled dropout rows: {nan_filled}")
 
 	def _writer_tick(self):
 		return
@@ -2046,43 +2046,61 @@ class MultiTinZrViewer(QtWidgets.QWidget):
 				if self.record_next_sample_idx is None:
 					return
 
-			have_all = all(
-				self.record_next_sample_idx in self.record_pending.get(did, {})
-				for did in self.rec_devices_order
-			)
-			if not have_all:
-				latest_ready = []
-				for did in self.rec_devices_order:
-					pending = self.record_pending.get(did, {})
-					if not pending:
-						return
-					latest_ready.append(max(pending.keys()))
-				min_latest = min(latest_ready)
-				if min_latest <= self.record_next_sample_idx:
+			for did in self.rec_devices_order:
+				pending = self.record_pending.get(did, {})
+				if not pending:
 					return
-				self.record_next_sample_idx += 1
-				self.record_skip_count += 1
-				continue
+			if any(
+				self.record_next_sample_idx not in self.record_pending.get(did, {}) and
+				max(self.record_pending.get(did, {}).keys()) <= self.record_next_sample_idx
+				for did in self.rec_devices_order
+			):
+				return
 
 			host_time_s = (self.record_next_idx - 1) / float(FW_FS_HINT_HZ)
 			row = [self.record_next_idx, f"{host_time_s:.6f}"]
+			row_has_dropout = False
 			for did in self.rec_devices_order:
-				sample_idx, ax, ay, az, gx, gy, gz, red, ir, hr, spo2, batt = self.record_pending[did].pop(self.record_next_sample_idx)
-				row.extend([
-					sample_idx,
-					f"{ax:.6f}",
-					f"{ay:.6f}",
-					f"{az:.6f}",
-					f"{gx:.6f}",
-					f"{gy:.6f}",
-					f"{gz:.6f}",
-					f"{red:.6f}",
-					f"{ir:.6f}",
-					hr,
-					spo2,
-					batt,
-				])
+				pending = self.record_pending[did]
+				stale_keys = [key for key in pending.keys() if key < self.record_next_sample_idx]
+				for key in stale_keys:
+					pending.pop(key, None)
+
+				if self.record_next_sample_idx in pending:
+					sample_idx, ax, ay, az, gx, gy, gz, red, ir, hr, spo2, batt = pending.pop(self.record_next_sample_idx)
+					row.extend([
+						sample_idx,
+						f"{ax:.6f}",
+						f"{ay:.6f}",
+						f"{az:.6f}",
+						f"{gx:.6f}",
+						f"{gy:.6f}",
+						f"{gz:.6f}",
+						f"{red:.6f}",
+						f"{ir:.6f}",
+						hr,
+						spo2,
+						batt,
+					])
+				else:
+					row_has_dropout = True
+					row.extend([
+						self.record_next_sample_idx,
+						"nan",
+						"nan",
+						"nan",
+						"nan",
+						"nan",
+						"nan",
+						"nan",
+						"nan",
+						"nan",
+						"nan",
+						"nan",
+					])
 			self.record_writer.writerow(row)
+			if row_has_dropout:
+				self.record_skip_count += 1
 			self.record_next_idx += 1
 			self.record_next_sample_idx += 1
 
