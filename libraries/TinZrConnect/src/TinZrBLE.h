@@ -35,8 +35,8 @@ struct TinZrBLEConfig {
 
 	bool     auto_restart_advertising = true;
 	bool     scan_response            = true;
-	// Default chosen so a "9-frame" (9*23=207 B) wearable packet fits in one notify
-	// if MTU allows; if not, TinZrBLEGatt::notify() will automatically chunk.
+	// If MTU allows, set this to MTU - 3 so each application packet fits
+	// in one notification. Otherwise TinZrBLEGatt::notify() chunks safely.
 	uint16_t max_notify_chunk         = 220;
 	uint16_t preferred_mtu            = 0; // 0 = do not call setMTU()
 };

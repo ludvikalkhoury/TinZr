@@ -126,7 +126,9 @@ bool TinZrBLEGatt::notify(const uint8_t* data, size_t len) {
 
 #if TINZR_ENABLE_BLE
 void TinZrBLEGatt::onConnect(BLEServer* server) {
-	(void)server;
+	if (server != nullptr) {
+		server->updateConnParams(server->getConnId(), 6, 12, 0, 400);
+	}
 	_state = TinZrBLEState::CONNECTED;
 
 	// LED: solid when connected
