@@ -20,7 +20,7 @@
 #endif
 
 struct TinZrWearableSDConfig {
-	uint16_t    sample_interval_ms = 4;        // 250 Hz
+	uint16_t    sample_interval_ms = 4;        // 250 Hz CSV rate
 	const char* sd_log_dir         = "/TinZrLogs";
 	const char* hostname           = "TinZr";
 };
@@ -51,6 +51,7 @@ private:
 	static constexpr float GYR_SCALE_DPS_PER_LSB = 0.035f;
 	static constexpr float PPG_ADC_FULL_SCALE_NA = 16384.0f;
 	static constexpr float PPG_ADC_MAX_COUNT     = 262143.0f;
+	static constexpr int PPG_SAMPLE_RATE_HZ      = 400;
 	static constexpr int PIN_BAT = A1;
 	static constexpr float BAT_VREF = 3.3f;
 	static constexpr float BAT_ADC_MAX = 4095.0f;
@@ -116,6 +117,7 @@ private:
 
 	void maxWrite8(uint8_t reg, uint8_t val);
 	bool initPPG();
+	bool readFreshPpgSample(uint32_t& red, uint32_t& ir, uint16_t timeoutMs);
 
 	void startRecording();
 	void stopRecording();

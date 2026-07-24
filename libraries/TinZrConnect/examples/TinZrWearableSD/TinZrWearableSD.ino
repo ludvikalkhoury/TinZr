@@ -27,7 +27,9 @@
  * ---------------------------------------------------------------
  * sample_interval_ms
  *   Sampling period in milliseconds.
- *   The default value of 4 ms targets 250 Hz.
+ *   The default value of 4 ms targets 250 Hz. The MAX30102 runs faster
+ *   than the CSV rate, and each row logs the newest real FIFO sample
+ *   available at that scheduled row time.
  *
  * sd_log_dir
  *   Directory on the SD card where CSV log files are saved.
@@ -40,12 +42,14 @@
  * ---------------------------------------------------------------
  * Logged Columns
  * ---------------------------------------------------------------
- * t_ms, red_nA, ir_nA, ax_g, ay_g, az_g, gx_dps, gy_dps, gz_dps
+ * t_ms, red_nA, ir_nA, ppg_valid, ax_g, ay_g, az_g, gx_dps, gy_dps, gz_dps
  *
  * The IMU is required. The MAX30102 PPG sensor is optional; if it is
  * not detected, red_nA and ir_nA values are logged as zero. PPG values
- * are approximate photodiode current in nanoamps. Accelerometer values
- * are logged in g, and gyroscope values are logged in degrees per second.
+ * are approximate photodiode current in nanoamps. ppg_valid is 1 when
+ * the row contains a fresh FIFO PPG sample and 0 when no real FIFO sample
+ * was available. Accelerometer values are logged in g, and gyroscope
+ * values are logged in degrees per second.
  *
  * Keep setup() and loop() small. The implementation lives in
  * TinZrWearableSD.h / TinZrWearableSD.cpp so this file only exposes
@@ -56,7 +60,7 @@
 #include "TinZrWearableSD.h"
 
 TinZrWearableSDConfig cfg = {
-	.sample_interval_ms = 4,      // 250 Hz
+	.sample_interval_ms = 4,      // 250 Hz CSV rate
 	.sd_log_dir         = "/TinZrLogs",
 	.hostname           = "TinZrBlue"
 };

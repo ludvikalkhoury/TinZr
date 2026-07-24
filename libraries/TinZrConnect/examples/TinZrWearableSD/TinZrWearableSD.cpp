@@ -339,15 +339,15 @@ void TinZrWearableSD_Class::maxWrite8(uint8_t reg, uint8_t val) {
 bool TinZrWearableSD_Class::initPPG() {
 	if (!ppg.begin(Wire, I2C_SPEED_FAST, MAX30102_ADDR)) return false;
 
-	// Slightly more explicit setup, still simple
+	// MAX30102 does not offer a native 250 Hz rate. Run the FIFO faster
+	// than the CSV rate, then log the newest real FIFO sample per row.
 	const byte powerLevel    = 0x3F;
-	const byte sampleAverage = 4;
+	const byte sampleAverage = 1;
 	const byte ledMode       = 2;
-	const int  sampleRate    = 400;
 	const int  pulseWidth    = 411;
 	const int  adcRange      = 16384;
 
-	ppg.setup(powerLevel, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange);
+	ppg.setup(powerLevel, sampleAverage, ledMode, PPG_SAMPLE_RATE_HZ, pulseWidth, adcRange);
 	ppg.setPulseAmplitudeRed(powerLevel);
 	ppg.setPulseAmplitudeIR(powerLevel);
 
@@ -356,6 +356,28 @@ bool TinZrWearableSD_Class::initPPG() {
 	maxWrite8(REG_OVF_COUNTER, 0x00);
 
 	return true;
+}
+
+bool TinZrWearableSD_Class::readFreshPpgSample(uint32_t& red, uint32_t& ir, uint16_t timeoutMs) {
+	if (!ppgAvailable) return false;
+
+	const uint32_t startMs = millis();
+	do {
+		ppg.check();
+		if (ppg.available()) {
+			// Drain older entries and keep the newest real FIFO sample.
+			do {
+				red = ppg.getFIFORed();
+				ir  = ppg.getFIFOIR();
+				ppg.nextSample();
+				ppg.check();
+			} while (ppg.available());
+			return true;
+		}
+		delayMicroseconds(250);
+	} while ((uint32_t)(millis() - startMs) < timeoutMs);
+
+	return false;
 }
 
 // =========================
@@ -386,6 +408,12 @@ void TinZrWearableSD_Class::startRecording() {
 
 	recording = true;
 	setRecordingLED();
+
+	if (ppgAvailable) {
+		maxWrite8(REG_FIFO_WR_PTR, 0x00);
+		maxWrite8(REG_FIFO_RD_PTR, 0x00);
+		maxWrite8(REG_OVF_COUNTER, 0x00);
+	}
 
 	recordStartMs = millis();
 	scheduledMs   = recordStartMs;
@@ -430,6 +458,8 @@ void TinZrWearableSD_Class::writeLogHeader(const String& filename) {
 	logFile.println(cfg.sample_interval_ms);
 	logFile.print("# target_sample_rate_hz: ");
 	logFile.println(cfg.sample_interval_ms > 0 ? (1000.0f / cfg.sample_interval_ms) : 0.0f, 3);
+	logFile.print("# ppg_hardware_sample_rate_hz: ");
+	logFile.println(PPG_SAMPLE_RATE_HZ);
 	logFile.print("# imu_i2c_address: 0x");
 	logFile.println(LSM6_ADDR, HEX);
 	logFile.print("# ppg_i2c_address: 0x");
@@ -439,6 +469,7 @@ void TinZrWearableSD_Class::writeLogHeader(const String& filename) {
 	logFile.println("# column_units:");
 	logFile.println("#   t_ms: milliseconds");
 	logFile.println("#   red_nA, ir_nA: approximate MAX30102 photodiode current in nanoamps");
+	logFile.println("#   ppg_valid: 1=fresh FIFO PPG sample, 0=no FIFO PPG sample available");
 	logFile.println("#   ax_g, ay_g, az_g: g");
 	logFile.println("#   gx_dps, gy_dps, gz_dps: degrees per second");
 	logFile.println("# max30102_adc_full_scale_nA: 16384");
@@ -449,11 +480,13 @@ void TinZrWearableSD_Class::writeLogHeader(const String& filename) {
 	logFile.println("# imu_gyro_fullscale: +/-1000dps");
 	logFile.println("# imu_accel_scale_g_per_lsb: 0.000244");
 	logFile.println("# imu_gyro_scale_dps_per_lsb: 0.035");
-	logFile.println("# ppg_note: red_nA and ir_nA are logged as zero if PPG is unavailable");
+	logFile.println("# ppg_note: red_nA and ir_nA are zero if no fresh FIFO sample is ready");
+	logFile.println("# ppg_rate_note: MAX30102 FIFO runs faster than the CSV rate; each row uses the newest real FIFO sample");
+	logFile.println("# ppg_unavailable_note: red_nA and ir_nA are zero if PPG is unavailable");
 	logFile.println("# time_note: t_ms is scheduled elapsed time from recording start");
 	logFile.println("# pc_start_timestamp_note: PC timestamp sent by the GUI at the start command, right before SD logging starts");
 	logFile.println("# -----------------------------------------------");
-	logFile.println("t_ms,red_nA,ir_nA,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps");
+	logFile.println("t_ms,red_nA,ir_nA,ppg_valid,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps");
 }
 
 // =========================
@@ -481,15 +514,7 @@ void TinZrWearableSD_Class::writeOneSample(uint32_t sampleTimeMs) {
 
 	uint32_t red = 0;
 	uint32_t ir  = 0;
-
-	if (ppgAvailable) {
-		ppg.check();
-		if (ppg.available()) {
-			red = ppg.getFIFORed();
-			ir  = ppg.getFIFOIR();
-			ppg.nextSample();
-		}
-	}
+	bool ppgValid = readFreshPpgSample(red, ir, cfg.sample_interval_ms);
 
 	float red_nA = red * PPG_ADC_FULL_SCALE_NA / PPG_ADC_MAX_COUNT;
 	float ir_nA  = ir  * PPG_ADC_FULL_SCALE_NA / PPG_ADC_MAX_COUNT;
@@ -500,6 +525,7 @@ void TinZrWearableSD_Class::writeOneSample(uint32_t sampleTimeMs) {
 	logFile.print(t_ms);  logFile.print(",");
 	logFile.print(red_nA, 6);   logFile.print(",");
 	logFile.print(ir_nA, 6);    logFile.print(",");
+	logFile.print(ppgValid ? 1 : 0); logFile.print(",");
 	logFile.print(ax_g, 6);    logFile.print(",");
 	logFile.print(ay_g, 6);    logFile.print(",");
 	logFile.print(az_g, 6);    logFile.print(",");
